@@ -31,3 +31,4 @@ ELECTRON_IS_DEV=1 electron .
 trap "kill $REACT_PID 2>/dev/null" EXIT
 
 
+

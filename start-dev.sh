@@ -30,3 +30,4 @@ ELECTRON_IS_DEV=1 electron .
 # Cleanup on exit
 trap "kill $REACT_PID 2>/dev/null" EXIT
 
+

@@ -299,61 +299,190 @@ app.on('web-contents-created', (event, contents) => {
 // Store validated sudo password (in memory, also saved to keychain)
 let validatedSudoPassword = null;
 
+// Platform detection helpers
+const isWindows = () => process.platform === 'win32';
+const isLinux = () => process.platform === 'linux';
+const isMacOS = () => process.platform === 'darwin';
+const getPlatformName = () => {
+  if (isWindows()) return 'Windows';
+  if (isLinux()) return 'Linux';
+  if (isMacOS()) return 'macOS';
+  return 'Unknown';
+};
+
+// Get installation guide URL based on platform
+const getInstallationGuide = (platform) => {
+  if (platform === 'Windows') {
+    return 'https://openvpn.net/community-downloads/';
+  } else if (platform === 'Linux') {
+    return 'https://community.openvpn.net/openvpn/wiki/OpenvpnSoftwareRepos';
+  } else if (platform === 'macOS') {
+    return 'https://openvpn.net/community-downloads/';
+  }
+  return 'https://openvpn.net/community-downloads/';
+};
+
 // Find OpenVPN executable path
 const findOpenVpnPath = async () => {
-  const possiblePaths = [
-    '/opt/homebrew/sbin/openvpn',      // Homebrew Apple Silicon (sbin)
-    '/opt/homebrew/bin/openvpn',       // Homebrew Apple Silicon (bin)
-    '/usr/local/sbin/openvpn',         // Homebrew Intel (sbin)
-    '/usr/local/bin/openvpn',          // Homebrew Intel (bin)
-    '/usr/sbin/openvpn',               // System sbin
-    '/usr/bin/openvpn'                 // System bin
-  ];
+  const platform = process.platform;
+  logToFile('INFO', 'Searching for OpenVPN on platform:', platform);
   
-  logToFile('INFO', 'Searching for OpenVPN...');
-  
-  // Try to find openvpn using 'which' command with full PATH
-  try {
-    const envPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin';
-    const { stdout } = await execAsync('which openvpn', { 
-      timeout: 2000,
-      env: { ...process.env, PATH: envPath }
-    });
-    if (stdout && stdout.trim()) {
-      const foundPath = stdout.trim();
-      logToFile('INFO', 'Found OpenVPN using which:', foundPath);
-      if (fs.existsSync(foundPath)) {
-        return foundPath;
-      }
-    }
-  } catch (e) {
-    logToFile('WARN', 'which openvpn failed, trying direct paths...', e.message);
-  }
-  
-  // Try direct path check
-  for (const testPath of possiblePaths) {
+  if (isWindows()) {
+    // Windows paths
+    const possiblePaths = [
+      'C:\\Program Files\\OpenVPN\\bin\\openvpn.exe',
+      'C:\\Program Files (x86)\\OpenVPN\\bin\\openvpn.exe',
+      'C:\\OpenVPN\\bin\\openvpn.exe'
+    ];
+    
+    // Try to find using 'where' command
     try {
-      if (fs.existsSync(testPath)) {
-        logToFile('INFO', 'Found OpenVPN at:', testPath);
-        return testPath;
+      const { stdout } = await execAsync('where openvpn', { 
+        timeout: 2000,
+        shell: true
+      });
+      if (stdout && stdout.trim()) {
+        const foundPath = stdout.trim().split('\r\n')[0].trim();
+        logToFile('INFO', 'Found OpenVPN using where:', foundPath);
+        if (fs.existsSync(foundPath)) {
+          return foundPath;
+        }
       }
     } catch (e) {
-      continue;
+      logToFile('WARN', 'where openvpn failed, trying direct paths...', e.message);
     }
-  }
-  
-  // Last resort: try to execute openvpn --version to verify it's in PATH
-  try {
-    const envPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin';
-    await execAsync('openvpn --version', { 
-      timeout: 2000,
-      env: { ...process.env, PATH: envPath }
-    });
-    logToFile('INFO', 'OpenVPN found in PATH (verified with --version)');
-    return 'openvpn';
-  } catch (e) {
-    logToFile('ERROR', 'OpenVPN not found in PATH or common locations');
-    throw new Error('OpenVPN not found. Please install OpenVPN or add it to your PATH.');
+    
+    // Try direct path check
+    for (const testPath of possiblePaths) {
+      try {
+        if (fs.existsSync(testPath)) {
+          logToFile('INFO', 'Found OpenVPN at:', testPath);
+          return testPath;
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+    
+    // Last resort: try to execute openvpn --version
+    try {
+      await execAsync('openvpn --version', { 
+        timeout: 2000,
+        shell: true
+      });
+      logToFile('INFO', 'OpenVPN found in PATH (verified with --version)');
+      return 'openvpn.exe';
+    } catch (e) {
+      logToFile('ERROR', 'OpenVPN not found in PATH or common locations');
+      throw new Error('OpenVPN not found. Please install OpenVPN from https://openvpn.net/community-downloads/');
+    }
+  } else if (isLinux()) {
+    // Linux paths
+    const possiblePaths = [
+      '/usr/bin/openvpn',
+      '/usr/sbin/openvpn',
+      '/usr/local/bin/openvpn',
+      '/usr/local/sbin/openvpn',
+      '/opt/openvpn/bin/openvpn'
+    ];
+    
+    // Try to find using 'which' command
+    try {
+      const envPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+      const { stdout } = await execAsync('which openvpn', { 
+        timeout: 2000,
+        env: { ...process.env, PATH: envPath }
+      });
+      if (stdout && stdout.trim()) {
+        const foundPath = stdout.trim();
+        logToFile('INFO', 'Found OpenVPN using which:', foundPath);
+        if (fs.existsSync(foundPath)) {
+          return foundPath;
+        }
+      }
+    } catch (e) {
+      logToFile('WARN', 'which openvpn failed, trying direct paths...', e.message);
+    }
+    
+    // Try direct path check
+    for (const testPath of possiblePaths) {
+      try {
+        if (fs.existsSync(testPath)) {
+          logToFile('INFO', 'Found OpenVPN at:', testPath);
+          return testPath;
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+    
+    // Last resort: try to execute openvpn --version
+    try {
+      const envPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+      await execAsync('openvpn --version', { 
+        timeout: 2000,
+        env: { ...process.env, PATH: envPath }
+      });
+      logToFile('INFO', 'OpenVPN found in PATH (verified with --version)');
+      return 'openvpn';
+    } catch (e) {
+      logToFile('ERROR', 'OpenVPN not found in PATH or common locations');
+      throw new Error('OpenVPN not found. Please install OpenVPN. For Linux: https://community.openvpn.net/openvpn/wiki/OpenvpnSoftwareRepos');
+    }
+  } else {
+    // macOS paths (existing implementation)
+    const possiblePaths = [
+      '/opt/homebrew/sbin/openvpn',      // Homebrew Apple Silicon (sbin)
+      '/opt/homebrew/bin/openvpn',       // Homebrew Apple Silicon (bin)
+      '/usr/local/sbin/openvpn',         // Homebrew Intel (sbin)
+      '/usr/local/bin/openvpn',          // Homebrew Intel (bin)
+      '/usr/sbin/openvpn',               // System sbin
+      '/usr/bin/openvpn'                 // System bin
+    ];
+    
+    // Try to find using 'which' command
+    try {
+      const envPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin';
+      const { stdout } = await execAsync('which openvpn', { 
+        timeout: 2000,
+        env: { ...process.env, PATH: envPath }
+      });
+      if (stdout && stdout.trim()) {
+        const foundPath = stdout.trim();
+        logToFile('INFO', 'Found OpenVPN using which:', foundPath);
+        if (fs.existsSync(foundPath)) {
+          return foundPath;
+        }
+      }
+    } catch (e) {
+      logToFile('WARN', 'which openvpn failed, trying direct paths...', e.message);
+    }
+    
+    // Try direct path check
+    for (const testPath of possiblePaths) {
+      try {
+        if (fs.existsSync(testPath)) {
+          logToFile('INFO', 'Found OpenVPN at:', testPath);
+          return testPath;
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+    
+    // Last resort: try to execute openvpn --version
+    try {
+      const envPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin';
+      await execAsync('openvpn --version', { 
+        timeout: 2000,
+        env: { ...process.env, PATH: envPath }
+      });
+      logToFile('INFO', 'OpenVPN found in PATH (verified with --version)');
+      return 'openvpn';
+    } catch (e) {
+      logToFile('ERROR', 'OpenVPN not found in PATH or common locations');
+      throw new Error('OpenVPN not found. Please install OpenVPN or add it to your PATH.');
+    }
   }
 };
 
@@ -592,6 +721,34 @@ ipcMain.handle('open-file-dialog', async () => {
 // Validate sudo password
 ipcMain.handle('validate-sudo-password', async (event, password) => {
   try {
+    // Skip validation for Windows - no sudo needed
+    if (isWindows()) {
+      // Just create directory if needed
+      const directoryExists = checkVpnDirectory();
+      let directoryCreated = false;
+      
+      if (!directoryExists) {
+        const createResult = await createVpnDirectory(null); // No password needed for Windows
+        if (!createResult.success) {
+          return {
+            success: false,
+            error: createResult.error || 'Failed to create VPN directory'
+          };
+        }
+        directoryCreated = createResult.usedSudo || false;
+      }
+      
+      return {
+        success: true,
+        message: directoryCreated 
+          ? 'Directory created successfully'
+          : 'Ready to use',
+        directoryCreated: directoryCreated,
+        directoryExists: directoryExists || directoryCreated
+      };
+    }
+    
+    // For Linux/macOS: validate sudo password
     // Test password by trying to run a sudo command
     // Use -S flag to read password from stdin
     // Escape special characters in password
@@ -683,6 +840,11 @@ ipcMain.handle('check-vpn-directory', async () => {
 
 // Check if sudo password is available and valid (from keychain or memory)
 ipcMain.handle('check-sudo-password', async () => {
+  // Skip for Windows - no sudo needed
+  if (isWindows()) {
+    return true;
+  }
+  
   // If not in memory, try to load from keychain
   if (!validatedSudoPassword) {
     const loaded = await loadSudoPasswordFromKeychain();
@@ -727,6 +889,33 @@ ipcMain.handle('check-sudo-password', async () => {
   }
 
   return false;
+});
+
+// Check if OpenVPN is installed
+ipcMain.handle('check-openvpn-installed', async () => {
+  const platform = getPlatformName();
+  const installationGuide = getInstallationGuide(platform);
+  
+  try {
+    const openvpnPath = await findOpenVpnPath();
+    logToFile('INFO', 'OpenVPN check: Installed at', openvpnPath);
+    return {
+      installed: true,
+      path: openvpnPath,
+      platform: platform,
+      error: null,
+      installationGuide: installationGuide
+    };
+  } catch (error) {
+    logToFile('ERROR', 'OpenVPN check: Not installed', error.message);
+    return {
+      installed: false,
+      path: null,
+      platform: platform,
+      error: error.message,
+      installationGuide: installationGuide
+    };
+  }
 });
 
 // Store running OpenVPN processes (key: serverId, value: process info)
@@ -816,34 +1005,36 @@ ipcMain.handle('connect-vpn', async (event, data) => {
       return { success: false, error: 'VPN file not found' };
     }
 
-    // Ensure sudo password is available and valid
-    if (!validatedSudoPassword) {
-      // Try to load from keychain
-      const loaded = await loadSudoPasswordFromKeychain();
-      if (!loaded) {
-        return { success: false, error: 'Sudo password not available. Please enter password first.' };
+    // Ensure sudo password is available and valid (only for Linux/macOS)
+    if (!isWindows()) {
+      if (!validatedSudoPassword) {
+        // Try to load from keychain
+        const loaded = await loadSudoPasswordFromKeychain();
+        if (!loaded) {
+          return { success: false, error: 'Sudo password not available. Please enter password first.' };
+        }
       }
-    }
 
-    // Validate password is still valid by refreshing sudo timestamp
-    try {
-      const escapedPassword = validatedSudoPassword.replace(/'/g, "'\\''").replace(/\$/g, '\\$').replace(/`/g, '\\`');
-      const validateCommand = `echo '${escapedPassword}' | sudo -S -v 2>&1`;
-      const { stderr } = await execAsync(validateCommand, { timeout: 5000, maxBuffer: 1024 });
-      
-      if (stderr && stderr.includes('Sorry, try again')) {
-        // Password expired or invalid, clear it
-        validatedSudoPassword = null;
-        await deleteSudoPasswordFromKeychain();
-        return { success: false, error: 'Sudo password expired. Please enter password again.' };
+      // Validate password is still valid by refreshing sudo timestamp
+      try {
+        const escapedPassword = validatedSudoPassword.replace(/'/g, "'\\''").replace(/\$/g, '\\$').replace(/`/g, '\\`');
+        const validateCommand = `echo '${escapedPassword}' | sudo -S -v 2>&1`;
+        const { stderr } = await execAsync(validateCommand, { timeout: 5000, maxBuffer: 1024 });
+        
+        if (stderr && stderr.includes('Sorry, try again')) {
+          // Password expired or invalid, clear it
+          validatedSudoPassword = null;
+          await deleteSudoPasswordFromKeychain();
+          return { success: false, error: 'Sudo password expired. Please enter password again.' };
+        }
+      } catch (error) {
+        if (error.stderr && error.stderr.includes('Sorry, try again')) {
+          validatedSudoPassword = null;
+          await deleteSudoPasswordFromKeychain();
+          return { success: false, error: 'Sudo password expired. Please enter password again.' };
+        }
+        // Continue if other error (might be network issue, etc)
       }
-    } catch (error) {
-      if (error.stderr && error.stderr.includes('Sorry, try again')) {
-        validatedSudoPassword = null;
-        await deleteSudoPasswordFromKeychain();
-        return { success: false, error: 'Sudo password expired. Please enter password again.' };
-      }
-      // Continue if other error (might be network issue, etc)
     }
 
     // Handle email in .ovpn file based on saveEmail checkbox
@@ -865,7 +1056,6 @@ ipcMain.handle('connect-vpn', async (event, data) => {
     // Note: We'll create auth file below based on saveEmail flag
 
     // Build OpenVPN command
-    const escapedPassword = validatedSudoPassword.replace(/'/g, "'\\''").replace(/\$/g, '\\$').replace(/`/g, '\\`');
     const escapedFilePath = filePath.replace(/'/g, "'\\''");
     
     // Create auth file with email and password
@@ -882,7 +1072,10 @@ ipcMain.handle('connect-vpn', async (event, data) => {
       fs.writeFileSync(tempAuthFile, `${email}\n${password}`, 'utf8');
     }
     
-    fs.chmodSync(tempAuthFile, 0o600);
+    // Set file permissions (Unix only)
+    if (!isWindows()) {
+      fs.chmodSync(tempAuthFile, 0o600);
+    }
     const escapedAuthFile = tempAuthFile.replace(/'/g, "'\\''");
     
     // Find OpenVPN executable path
@@ -898,14 +1091,21 @@ ipcMain.handle('connect-vpn', async (event, data) => {
       };
     }
     
-    // Run OpenVPN with sudo
-    // Note: If saveEmail is true, the .ovpn file already has auth-user-pass <email>
-    // but we still provide the auth file for password
+    // Build command based on platform
     const escapedOpenvpnPath = openvpnPath.replace(/'/g, "'\\''");
+    let command;
+    let envPath;
     
-    // Ensure PATH includes common OpenVPN locations
-    const envPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin';
-    const command = `echo '${escapedPassword}' | sudo -S '${escapedOpenvpnPath}' --config '${escapedFilePath}' --auth-user-pass '${escapedAuthFile}'`;
+    if (isWindows()) {
+      // Windows: no sudo needed, direct execution
+      envPath = process.env.PATH || '';
+      command = `"${escapedOpenvpnPath}" --config "${escapedFilePath}" --auth-user-pass "${escapedAuthFile}"`;
+    } else {
+      // Linux/macOS: use sudo
+      const escapedPassword = validatedSudoPassword.replace(/'/g, "'\\''").replace(/\$/g, '\\$').replace(/`/g, '\\`');
+      envPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin';
+      command = `echo '${escapedPassword}' | sudo -S '${escapedOpenvpnPath}' --config '${escapedFilePath}' --auth-user-pass '${escapedAuthFile}'`;
+    }
 
     logToFile('INFO', 'Executing OpenVPN command...');
     logToFile('INFO', 'OpenVPN path:', openvpnPath);
@@ -913,7 +1113,7 @@ ipcMain.handle('connect-vpn', async (event, data) => {
     logToFile('INFO', 'Auth file:', tempAuthFile);
     
     // Execute OpenVPN in background
-    const openvpnProcess = exec(command, {
+    const execOptions = {
       cwd: VPN_DIRECTORY,
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'], // Capture stdout and stderr for debugging
@@ -921,7 +1121,14 @@ ipcMain.handle('connect-vpn', async (event, data) => {
         ...process.env,
         PATH: envPath  // Use the expanded PATH with all common locations
       }
-    }, (error, stdout, stderr) => {
+    };
+    
+    // Add shell option for Windows
+    if (isWindows()) {
+      execOptions.shell = true;
+    }
+    
+    const openvpnProcess = exec(command, execOptions, (error, stdout, stderr) => {
       if (error) {
         console.error('OpenVPN execution error:', error);
         if (stderr) {
@@ -993,45 +1200,23 @@ ipcMain.handle('connect-vpn', async (event, data) => {
 // Disconnect VPN (specific server or all)
 ipcMain.handle('disconnect-vpn', async (event, serverId) => {
   try {
-    const escapedPassword = validatedSudoPassword ? validatedSudoPassword.replace(/'/g, "'\\''").replace(/\$/g, '\\$').replace(/`/g, '\\`') : '';
-    
-    if (serverId) {
-      // Disconnect specific server
-      const processInfo = openvpnProcesses.get(serverId);
-      if (processInfo) {
-        // Kill specific OpenVPN process by file path
-        const escapedFilePath = processInfo.filePath.replace(/'/g, "'\\''");
-        if (escapedPassword) {
-          await execAsync(`echo '${escapedPassword}' | sudo -S pkill -f "openvpn.*${escapedFilePath}"`, { timeout: 5000 });
-        } else {
-          await execAsync(`pkill -f "openvpn.*${escapedFilePath}"`, { timeout: 5000 });
-        }
-        
-        // Clean up temp auth file
-        if (processInfo.tempAuthFile && fs.existsSync(processInfo.tempAuthFile)) {
+    if (isWindows()) {
+      // Windows: use taskkill
+      if (serverId) {
+        // Disconnect specific server
+        const processInfo = openvpnProcesses.get(serverId);
+        if (processInfo && processInfo.process && processInfo.process.pid) {
           try {
-            fs.unlinkSync(processInfo.tempAuthFile);
+            await execAsync(`taskkill /F /PID ${processInfo.process.pid}`, { 
+              timeout: 5000,
+              shell: true 
+            });
           } catch (e) {
-            console.error('Error deleting temp auth file:', e);
+            // Process might already be terminated
+            logToFile('WARN', 'Error killing process:', e.message);
           }
-        }
-        
-        openvpnProcesses.delete(serverId);
-        return { success: true, message: 'VPN disconnected' };
-      } else {
-        return { success: false, error: 'VPN connection not found' };
-      }
-    } else {
-      // Disconnect all VPNs
-      if (openvpnProcesses.size > 0) {
-        if (escapedPassword) {
-          await execAsync(`echo '${escapedPassword}' | sudo -S pkill -f openvpn`, { timeout: 5000 });
-        } else {
-          await execAsync('pkill -f openvpn', { timeout: 5000 });
-        }
-        
-        // Clean up all temp auth files
-        for (const [id, processInfo] of openvpnProcesses.entries()) {
+          
+          // Clean up temp auth file
           if (processInfo.tempAuthFile && fs.existsSync(processInfo.tempAuthFile)) {
             try {
               fs.unlinkSync(processInfo.tempAuthFile);
@@ -1039,12 +1224,97 @@ ipcMain.handle('disconnect-vpn', async (event, serverId) => {
               console.error('Error deleting temp auth file:', e);
             }
           }
+          
+          openvpnProcesses.delete(serverId);
+          return { success: true, message: 'VPN disconnected' };
+        } else {
+          return { success: false, error: 'VPN connection not found' };
         }
-        
-        openvpnProcesses.clear();
-        return { success: true, message: 'All VPNs disconnected' };
       } else {
-        return { success: true, message: 'No active VPN connections' };
+        // Disconnect all VPNs
+        if (openvpnProcesses.size > 0) {
+          try {
+            await execAsync('taskkill /F /IM openvpn.exe', { 
+              timeout: 5000,
+              shell: true 
+            });
+          } catch (e) {
+            // Process might already be terminated or not running
+            logToFile('WARN', 'Error killing OpenVPN processes:', e.message);
+          }
+          
+          // Clean up all temp auth files
+          for (const [id, processInfo] of openvpnProcesses.entries()) {
+            if (processInfo.tempAuthFile && fs.existsSync(processInfo.tempAuthFile)) {
+              try {
+                fs.unlinkSync(processInfo.tempAuthFile);
+              } catch (e) {
+                console.error('Error deleting temp auth file:', e);
+              }
+            }
+          }
+          
+          openvpnProcesses.clear();
+          return { success: true, message: 'All VPNs disconnected' };
+        } else {
+          return { success: true, message: 'No active VPN connections' };
+        }
+      }
+    } else {
+      // Linux/macOS: use pkill with sudo if needed
+      const escapedPassword = validatedSudoPassword ? validatedSudoPassword.replace(/'/g, "'\\''").replace(/\$/g, '\\$').replace(/`/g, '\\`') : '';
+      
+      if (serverId) {
+        // Disconnect specific server
+        const processInfo = openvpnProcesses.get(serverId);
+        if (processInfo) {
+          // Kill specific OpenVPN process by file path
+          const escapedFilePath = processInfo.filePath.replace(/'/g, "'\\''");
+          if (escapedPassword) {
+            await execAsync(`echo '${escapedPassword}' | sudo -S pkill -f "openvpn.*${escapedFilePath}"`, { timeout: 5000 });
+          } else {
+            await execAsync(`pkill -f "openvpn.*${escapedFilePath}"`, { timeout: 5000 });
+          }
+          
+          // Clean up temp auth file
+          if (processInfo.tempAuthFile && fs.existsSync(processInfo.tempAuthFile)) {
+            try {
+              fs.unlinkSync(processInfo.tempAuthFile);
+            } catch (e) {
+              console.error('Error deleting temp auth file:', e);
+            }
+          }
+          
+          openvpnProcesses.delete(serverId);
+          return { success: true, message: 'VPN disconnected' };
+        } else {
+          return { success: false, error: 'VPN connection not found' };
+        }
+      } else {
+        // Disconnect all VPNs
+        if (openvpnProcesses.size > 0) {
+          if (escapedPassword) {
+            await execAsync(`echo '${escapedPassword}' | sudo -S pkill -f openvpn`, { timeout: 5000 });
+          } else {
+            await execAsync('pkill -f openvpn', { timeout: 5000 });
+          }
+          
+          // Clean up all temp auth files
+          for (const [id, processInfo] of openvpnProcesses.entries()) {
+            if (processInfo.tempAuthFile && fs.existsSync(processInfo.tempAuthFile)) {
+              try {
+                fs.unlinkSync(processInfo.tempAuthFile);
+              } catch (e) {
+                console.error('Error deleting temp auth file:', e);
+              }
+            }
+          }
+          
+          openvpnProcesses.clear();
+          return { success: true, message: 'All VPNs disconnected' };
+        } else {
+          return { success: true, message: 'No active VPN connections' };
+        }
       }
     }
   } catch (error) {

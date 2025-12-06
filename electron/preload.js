@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   validateSudoPassword: (password) => ipcRenderer.invoke('validate-sudo-password', password),
   checkVpnDirectory: () => ipcRenderer.invoke('check-vpn-directory'),
   checkSudoPassword: () => ipcRenderer.invoke('check-sudo-password'),
+  checkOpenVpnInstalled: () => ipcRenderer.invoke('check-openvpn-installed'),
   connectVpn: (data) => ipcRenderer.invoke('connect-vpn', data),
   disconnectVpn: (serverId) => ipcRenderer.invoke('disconnect-vpn', serverId),
   deleteVpnFile: (filePath) => ipcRenderer.invoke('delete-vpn-file', filePath),

@@ -2,6 +2,7 @@
   "name": "vpn-client",
   "version": "1.0.0",
   "description": "VPN Client Desktop Application",
+  "homepage": ".",
   "main": "electron/main.js",
   "scripts": {
     "start": "react-scripts start",
@@ -10,11 +11,15 @@
     "electron-dev": "ELECTRON_IS_DEV=1 electron .",
     "dev": "concurrently \"npm start\" \"wait-on http://localhost:3000 -t 60000 && ELECTRON_IS_DEV=1 electron .\"",
     "dev:electron": "wait-on http://localhost:3000 && ELECTRON_IS_DEV=1 electron .",
+    "prod": "npm run build && electron .",
     "build-electron": "npm run build && electron-builder",
-    "postinstall": "electron-rebuild"
+    "build:mac": "npm run build && electron-builder --mac",
+    "build:win": "npm run build && electron-builder --win",
+    "build:linux": "npm run build && electron-builder --linux",
+    "build:all": "npm run build && electron-builder --mac --win --linux",
+    "postinstall": "electron-builder install-app-deps && electron-rebuild -f -w keytar"
   },
   "dependencies": {
-    "electron": "^27.0.0",
     "keytar": "^7.9.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
@@ -26,6 +31,8 @@
     "@types/react-dom": "^18.2.0",
     "autoprefixer": "^10.4.16",
     "concurrently": "^8.2.2",
+    "electron": "^27.0.0",
+    "electron-builder": "^24.13.3",
     "electron-rebuild": "^3.2.9",
     "postcss": "^8.4.32",
     "tailwindcss": "^3.3.6",
@@ -42,5 +49,96 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "build": {
+    "appId": "com.vpnclient.app",
+    "productName": "VPN Client",
+    "extends": null,
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "files": [
+      "build/**/*",
+      "electron/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/keytar/**/*"
+    ],
+    "extraFiles": [
+      {
+        "from": "icons",
+        "to": "icons",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.networking",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "icons/mac/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "ia32"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "icons/win/icon.ico"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Network",
+      "icon": "icons/png/512x512.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   }
 }

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -8,11 +8,74 @@ const execAsync = promisify(exec);
 const keytar = require('keytar');
 const isDev = process.env.ELECTRON_IS_DEV === '1';
 
-// App configuration
+// App configuration (must be defined before LOG_FILE)
 const APP_NAME = app.getName() || 'vpn_client';
 const VPN_DIRECTORY = path.join(os.homedir(), `.${APP_NAME}`);
 const KEYCHAIN_SERVICE = `${APP_NAME}_sudo_password`;
 const KEYCHAIN_ACCOUNT = 'sudo_password';
+
+// Setup logging to file (use VPN_DIRECTORY for logs)
+const LOG_FILE = path.join(VPN_DIRECTORY, 'app.log');
+
+// Store original console methods BEFORE overriding
+const originalLog = console.log;
+const originalError = console.error;
+const originalWarn = console.warn;
+
+// Create log function (use original console methods to avoid infinite loop)
+const logToFile = (level, message, ...args) => {
+  const timestamp = new Date().toISOString();
+  const logMessage = `[${timestamp}] [${level}] ${message} ${args.length > 0 ? JSON.stringify(args) : ''}\n`;
+  
+  try {
+    // Ensure directory exists before writing
+    if (!fs.existsSync(VPN_DIRECTORY)) {
+      fs.mkdirSync(VPN_DIRECTORY, { recursive: true, mode: 0o755 });
+    }
+    fs.appendFileSync(LOG_FILE, logMessage, 'utf8');
+  } catch (error) {
+    // Silently fail if can't write to log file
+    // Use originalError to avoid infinite loop
+    originalError('Failed to write to log file:', error);
+  }
+  
+  // Use original console methods to avoid infinite loop
+  if (level === 'ERROR') {
+    originalError(message, ...args);
+  } else if (level === 'WARN') {
+    originalWarn(message, ...args);
+  } else {
+    originalLog(message, ...args);
+  }
+};
+
+// Override console methods to also log to file
+console.log = (...args) => {
+  logToFile('INFO', args.join(' '));
+};
+
+console.error = (...args) => {
+  logToFile('ERROR', args.join(' '));
+};
+
+console.warn = (...args) => {
+  logToFile('WARN', args.join(' '));
+};
+
+// Get icon path based on platform
+function getIconPath() {
+  const platform = process.platform;
+  if (platform === 'darwin') {
+    // macOS
+    return path.join(__dirname, '../icons/mac/icon.icns');
+  } else if (platform === 'win32') {
+    // Windows
+    return path.join(__dirname, '../icons/win/icon.ico');
+  } else {
+    // Linux
+    return path.join(__dirname, '../icons/png/512x512.png');
+  }
+}
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -21,6 +84,7 @@ function createWindow() {
     minWidth: 800,
     minHeight: 600,
     backgroundColor: '#111827', // bg-gray-900
+    show: false, // Don't show until ready
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -29,8 +93,59 @@ function createWindow() {
     },
     titleBarStyle: 'default',
     frame: true,
-    icon: path.join(__dirname, '../public/icon.png'), // Optional: add icon later
+    icon: getIconPath(),
   });
+
+  // Show loading indicator immediately
+  const loadingHTML = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <style>
+        body {
+          margin: 0;
+          padding: 0;
+          background: #111827;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          height: 100vh;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          color: #fff;
+        }
+        .loader {
+          text-align: center;
+        }
+        .spinner {
+          border: 4px solid #374151;
+          border-top: 4px solid #3b82f6;
+          border-radius: 50%;
+          width: 50px;
+          height: 50px;
+          animation: spin 1s linear infinite;
+          margin: 0 auto 20px;
+        }
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+        .text {
+          font-size: 16px;
+          color: #9ca3af;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="loader">
+        <div class="spinner"></div>
+        <div class="text">Loading VPN Client...</div>
+      </div>
+    </body>
+    </html>
+  `;
+  win.loadURL(`data:text/html,${encodeURIComponent(loadingHTML)}`);
+  win.show(); // Show window with loading indicator
 
   // Load the app
   if (isDev) {
@@ -46,7 +161,88 @@ function createWindow() {
       win.webContents.openDevTools();
     });
   } else {
-    win.loadFile(path.join(__dirname, '../build/index.html'));
+    // Production mode: load from build folder
+    // In production, files are packaged in app.asar
+    // app.getAppPath() returns the path to app.asar in production
+    const appPath = app.getAppPath();
+    const buildIndexPath = path.join(appPath, 'build', 'index.html');
+    
+    console.log('Production mode - App path:', appPath);
+    console.log('Production mode - Build index path:', buildIndexPath);
+    
+    // Load the file - Electron can read from app.asar directly
+    win.loadFile(buildIndexPath).then(() => {
+      console.log('Successfully loaded build from:', buildIndexPath);
+    }).catch((error) => {
+      console.error('Failed to load build file:', error);
+      console.error('App path:', appPath);
+      console.error('Build path:', buildIndexPath);
+      
+      // Show error page with detailed info for debugging
+      const errorHTML = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <style>
+            body {
+              margin: 0;
+              padding: 40px;
+              background: #111827;
+              color: #fff;
+              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            }
+            h1 { color: #ef4444; }
+            pre {
+              background: #1f2937;
+              padding: 15px;
+              border-radius: 5px;
+              overflow-x: auto;
+              font-size: 12px;
+            }
+          </style>
+        </head>
+        <body>
+          <h1>Error: Failed to load application</h1>
+          <p>Unable to load build files. Please rebuild the application.</p>
+          <pre>Error: ${error.message}\n\nApp path: ${appPath}\nBuild path: ${buildIndexPath}</pre>
+        </body>
+        </html>
+      `;
+      win.loadURL(`data:text/html,${encodeURIComponent(errorHTML)}`);
+    });
+  }
+
+  // Show window when ready
+  win.once('ready-to-show', () => {
+    win.show();
+  });
+  
+  // Enable DevTools in production with keyboard shortcut (Cmd+Option+I or Cmd+Shift+I)
+  if (!isDev) {
+    // Register global shortcut to toggle DevTools
+    globalShortcut.register('CommandOrControl+Option+I', () => {
+      if (win) {
+        if (win.webContents.isDevToolsOpened()) {
+          win.webContents.closeDevTools();
+        } else {
+          win.webContents.openDevTools();
+        }
+      }
+    });
+    
+    // Also register Cmd+Shift+I as alternative
+    globalShortcut.register('CommandOrControl+Shift+I', () => {
+      if (win) {
+        if (win.webContents.isDevToolsOpened()) {
+          win.webContents.closeDevTools();
+        } else {
+          win.webContents.openDevTools();
+        }
+      }
+    });
+    
+    logToFile('INFO', 'DevTools shortcuts registered: Cmd+Option+I or Cmd+Shift+I');
   }
 
   // Handle window closed
@@ -57,10 +253,14 @@ function createWindow() {
 
 // This method will be called when Electron has finished initialization
 app.whenReady().then(async () => {
+  logToFile('INFO', 'Application starting...');
+  logToFile('INFO', 'App path:', app.getAppPath());
+  logToFile('INFO', 'Log file:', LOG_FILE);
+  
   // Load sudo password from keychain if available
   const passwordLoaded = await loadSudoPasswordFromKeychain();
   if (passwordLoaded) {
-    console.log('Sudo password loaded from keychain');
+    logToFile('INFO', 'Sudo password loaded from keychain');
   }
   
   createWindow();
@@ -74,9 +274,19 @@ app.whenReady().then(async () => {
 
 // Quit when all windows are closed
 app.on('window-all-closed', () => {
+  // Unregister all shortcuts
+  globalShortcut.unregisterAll();
+  logToFile('INFO', 'Application closing...');
+  
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+// Cleanup on app quit
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll();
+  logToFile('INFO', 'Application quit');
 });
 
 // Security: Prevent new window creation
@@ -88,6 +298,64 @@ app.on('web-contents-created', (event, contents) => {
 
 // Store validated sudo password (in memory, also saved to keychain)
 let validatedSudoPassword = null;
+
+// Find OpenVPN executable path
+const findOpenVpnPath = async () => {
+  const possiblePaths = [
+    '/opt/homebrew/sbin/openvpn',      // Homebrew Apple Silicon (sbin)
+    '/opt/homebrew/bin/openvpn',       // Homebrew Apple Silicon (bin)
+    '/usr/local/sbin/openvpn',         // Homebrew Intel (sbin)
+    '/usr/local/bin/openvpn',          // Homebrew Intel (bin)
+    '/usr/sbin/openvpn',               // System sbin
+    '/usr/bin/openvpn'                 // System bin
+  ];
+  
+  logToFile('INFO', 'Searching for OpenVPN...');
+  
+  // Try to find openvpn using 'which' command with full PATH
+  try {
+    const envPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin';
+    const { stdout } = await execAsync('which openvpn', { 
+      timeout: 2000,
+      env: { ...process.env, PATH: envPath }
+    });
+    if (stdout && stdout.trim()) {
+      const foundPath = stdout.trim();
+      logToFile('INFO', 'Found OpenVPN using which:', foundPath);
+      if (fs.existsSync(foundPath)) {
+        return foundPath;
+      }
+    }
+  } catch (e) {
+    logToFile('WARN', 'which openvpn failed, trying direct paths...', e.message);
+  }
+  
+  // Try direct path check
+  for (const testPath of possiblePaths) {
+    try {
+      if (fs.existsSync(testPath)) {
+        logToFile('INFO', 'Found OpenVPN at:', testPath);
+        return testPath;
+      }
+    } catch (e) {
+      continue;
+    }
+  }
+  
+  // Last resort: try to execute openvpn --version to verify it's in PATH
+  try {
+    const envPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin';
+    await execAsync('openvpn --version', { 
+      timeout: 2000,
+      env: { ...process.env, PATH: envPath }
+    });
+    logToFile('INFO', 'OpenVPN found in PATH (verified with --version)');
+    return 'openvpn';
+  } catch (e) {
+    logToFile('ERROR', 'OpenVPN not found in PATH or common locations');
+    throw new Error('OpenVPN not found. Please install OpenVPN or add it to your PATH.');
+  }
+};
 
 // Load sudo password from keychain on startup
 const loadSudoPasswordFromKeychain = async () => {
@@ -617,25 +885,93 @@ ipcMain.handle('connect-vpn', async (event, data) => {
     fs.chmodSync(tempAuthFile, 0o600);
     const escapedAuthFile = tempAuthFile.replace(/'/g, "'\\''");
     
+    // Find OpenVPN executable path
+    let openvpnPath;
+    try {
+      openvpnPath = await findOpenVpnPath();
+      logToFile('INFO', 'Using OpenVPN path:', openvpnPath);
+    } catch (error) {
+      logToFile('ERROR', 'Failed to find OpenVPN:', error.message);
+      return { 
+        success: false, 
+        error: error.message || 'OpenVPN not found. Please install OpenVPN.' 
+      };
+    }
+    
     // Run OpenVPN with sudo
     // Note: If saveEmail is true, the .ovpn file already has auth-user-pass <email>
     // but we still provide the auth file for password
-    const command = `echo '${escapedPassword}' | sudo -S openvpn --config '${escapedFilePath}' --auth-user-pass '${escapedAuthFile}'`;
+    const escapedOpenvpnPath = openvpnPath.replace(/'/g, "'\\''");
+    
+    // Ensure PATH includes common OpenVPN locations
+    const envPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin';
+    const command = `echo '${escapedPassword}' | sudo -S '${escapedOpenvpnPath}' --config '${escapedFilePath}' --auth-user-pass '${escapedAuthFile}'`;
 
+    logToFile('INFO', 'Executing OpenVPN command...');
+    logToFile('INFO', 'OpenVPN path:', openvpnPath);
+    logToFile('INFO', 'Config file:', filePath);
+    logToFile('INFO', 'Auth file:', tempAuthFile);
+    
     // Execute OpenVPN in background
     const openvpnProcess = exec(command, {
       cwd: VPN_DIRECTORY,
       detached: true,
-      stdio: 'ignore'
+      stdio: ['ignore', 'pipe', 'pipe'], // Capture stdout and stderr for debugging
+      env: {
+        ...process.env,
+        PATH: envPath  // Use the expanded PATH with all common locations
+      }
     }, (error, stdout, stderr) => {
       if (error) {
-        console.error('OpenVPN error:', error);
+        console.error('OpenVPN execution error:', error);
+        if (stderr) {
+          console.error('OpenVPN stderr:', stderr.toString());
+        }
+      }
+      if (stdout) {
+        console.log('OpenVPN stdout:', stdout.toString());
       }
       // Remove from map when process exits
       if (serverId) {
         openvpnProcesses.delete(serverId);
       }
     });
+    
+    // Log stderr for debugging
+    if (openvpnProcess.stderr) {
+      let stderrBuffer = '';
+      openvpnProcess.stderr.on('data', (data) => {
+        stderrBuffer += data.toString();
+        console.error('OpenVPN stderr:', data.toString());
+      });
+      
+      // Check for common errors after a short delay
+      setTimeout(() => {
+        if (stderrBuffer.includes('command not found') || stderrBuffer.includes('No such file')) {
+          console.error('OpenVPN command not found - installation issue');
+        }
+        if (stderrBuffer.includes('Permission denied')) {
+          console.error('OpenVPN permission denied - sudo issue');
+        }
+      }, 1000);
+    }
+    
+    // Log stdout for debugging
+    if (openvpnProcess.stdout) {
+      openvpnProcess.stdout.on('data', (data) => {
+        console.log('OpenVPN stdout:', data.toString());
+      });
+    }
+    
+    // Check if process started successfully
+    if (!openvpnProcess.pid) {
+      return { 
+        success: false, 
+        error: 'Failed to start OpenVPN process. Please check if OpenVPN is installed and accessible.' 
+      };
+    }
+    
+    console.log('OpenVPN process started with PID:', openvpnProcess.pid);
 
     // Store process info with serverId as key
     openvpnProcess.unref();

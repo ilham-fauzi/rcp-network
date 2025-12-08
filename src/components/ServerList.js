@@ -210,7 +210,7 @@ const ServerList = ({
               />
             </svg>
           </div>
-          <h1 className="text-xl font-bold text-gray-100">VPN Client</h1>
+          <h1 className="text-xl font-bold text-gray-100">RCP Network</h1>
         </div>
 
         {/* Search */}

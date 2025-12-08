@@ -1,7 +1,11 @@
 {
-  "name": "vpn-client",
+  "name": "rcp-network",
   "version": "1.0.0",
-  "description": "VPN Client Desktop Application",
+  "description": "RCP Network Desktop Application",
+  "author": {
+    "name": "Ilham Fauzi",
+    "email": "ilkham.fauzi@gmail.com"
+  },
   "homepage": ".",
   "main": "electron/main.js",
   "scripts": {
@@ -51,8 +55,8 @@
     ]
   },
   "build": {
-    "appId": "com.vpnclient.app",
-    "productName": "VPN Client",
+    "appId": "com.rcpnetwork.app",
+    "productName": "RCP Network",
     "extends": null,
     "directories": {
       "buildResources": "build",
@@ -142,3 +146,4 @@
     }
   }
 }
+

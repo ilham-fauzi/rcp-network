@@ -1,10 +1,11 @@
-# VPN Client Desktop Application
+# RCP Network Desktop Application
 
-A modern VPN Client desktop application built with Electron, React, and Tailwind CSS. This application allows users to manage and connect to VPN servers through OpenVPN configuration files (`.ovpn`).
+A modern RCP Network desktop application built with Electron, React, and Tailwind CSS. This application allows users to manage and connect to VPN servers through OpenVPN configuration files (`.ovpn`).
 
 ## Features
 
 ### Core Functionality
+
 - **Dark Mode UI**: Beautiful dark-themed interface with modern design
 - **Two-Panel Layout**: Sidebar for server management and main content for connection control
 - **Cross-Platform Support**: Full support for Windows, Linux, and macOS with platform-specific handling
@@ -14,6 +15,7 @@ A modern VPN Client desktop application built with Electron, React, and Tailwind
 - **Secure Storage**: System password stored securely in system keychain using `keytar`
 
 ### Server Management
+
 - **Import VPN Profiles**: Add new VPN servers by importing `.ovpn` files
 - **Server List**: View all configured VPN servers with search functionality
 - **Server Actions**:
@@ -24,6 +26,7 @@ A modern VPN Client desktop application built with Electron, React, and Tailwind
 - **Truncated Names**: Server names limited to 10 characters with ellipsis for better UI
 
 ### Connection Features
+
 - **Authentication Dialog**: Secure email and password input with save options
 - **Email Management**: Option to save email to `.ovpn` file or keep it temporary
 - **Password Management**: Option to save password to localStorage for convenience
@@ -31,6 +34,7 @@ A modern VPN Client desktop application built with Electron, React, and Tailwind
 - **System Password Management**: Secure system password storage and validation using system keychain
 
 ### Real-Time Monitoring
+
 - **Time-Series Traffic Chart**: Interactive chart showing download and upload speeds over time
 - **Current Speed Indicators**: Real-time display of current download and upload speeds
 - **Resizable Chart**: Drag handle to adjust chart height (200px - 600px range)
@@ -39,12 +43,14 @@ A modern VPN Client desktop application built with Electron, React, and Tailwind
 - **Activity Log**: Scrollable log area tracking all connection activities
 
 ### File Management
-- **Automatic Directory Creation**: Creates `~/.vpn_client` directory automatically (requires system password on first run for Linux/macOS, not required for Windows)
-- **File Storage**: All `.ovpn` files stored securely in `~/.vpn_client` directory (cross-platform path handling)
+
+- **Automatic Directory Creation**: Creates `~/.rcp-network` directory automatically (requires system password on first run for Linux/macOS, not required for Windows)
+- **File Storage**: All `.ovpn` files stored securely in `~/.rcp-network` directory (cross-platform path handling)
 - **File Operations**: Copy, rename, and delete operations for VPN configuration files
 
 ### Cross-Platform Support
-- **Windows Support**: 
+
+- **Windows Support**:
   - No sudo password required (uses UAC/elevation)
   - Automatic detection of OpenVPN in common installation paths
   - Uses `taskkill` for process management
@@ -58,6 +64,7 @@ A modern VPN Client desktop application built with Electron, React, and Tailwind
   - Automatic detection of OpenVPN in Homebrew and system paths
 
 ### OpenVPN Detection
+
 - **Proactive Detection**: Automatically checks for OpenVPN installation on application startup
 - **Warning Banner**: Displays prominent warning banner if OpenVPN is not installed
 - **Platform-Specific Guides**: Provides installation guide links specific to user's operating system
@@ -67,6 +74,7 @@ A modern VPN Client desktop application built with Electron, React, and Tailwind
 ## Installation
 
 ### Prerequisites
+
 - Node.js (v20-24 recommended)
 - npm or yarn
 - **OpenVPN**: Must be installed on your system
@@ -78,6 +86,7 @@ A modern VPN Client desktop application built with Electron, React, and Tailwind
 ### Steps
 
 1. Install dependencies:
+
 ```bash
 npm install
 ```
@@ -89,16 +98,19 @@ npm install
 To run the application in development mode, you have three options:
 
 ### Option 1: Using npm run dev (Recommended)
+
 ```bash
 npm run dev
 ```
 
 This will:
+
 - Start the React development server on http://localhost:3000
 - Wait for the server to be ready (up to 60 seconds)
 - Launch Electron with hot-reload enabled
 
 ### Option 2: Using start script (Alternative)
+
 ```bash
 ./start-dev.sh
 ```
@@ -106,6 +118,7 @@ This will:
 This script ensures React server is ready before starting Electron.
 
 ### Option 3: Run separately (Manual)
+
 ```bash
 # Terminal 1: Start React dev server
 npm start
@@ -115,7 +128,8 @@ npm start
 npm run electron-dev
 ```
 
-**Note:** 
+**Note:**
+
 - Electron will automatically retry connecting to the React dev server if it's not ready yet
 - Make sure React server shows "Compiled successfully!" before starting Electron manually
 - If you see "ERR_CONNECTION_REFUSED", wait a few more seconds - Electron will retry automatically
@@ -138,7 +152,7 @@ npm run build-electron
 ## Project Structure
 
 ```
-vpn_client/
+rcp_network/
 ├── electron/
 │   ├── main.js          # Electron main process (IPC handlers, file operations)
 │   └── preload.js       # Preload script for secure IPC communication
@@ -164,6 +178,7 @@ vpn_client/
 ## Components
 
 ### ServerList.js
+
 - Server list with search functionality
 - Status indicators (Connected, Connecting, Disconnected)
 - Server item actions:
@@ -175,6 +190,7 @@ vpn_client/
 - Server name truncation (max 10 characters)
 
 ### ConnectionControl.js
+
 - Status banner with connection info
 - Time-series traffic chart integration
 - Real-time statistics (Download, Upload, Latency, IP Address)
@@ -182,6 +198,7 @@ vpn_client/
 - Footer with version info
 
 ### TrafficChart.js
+
 - Time-series visualization using Recharts
 - Real-time data collection (updates every second)
 - Current speed indicators (Download/Upload)
@@ -190,6 +207,7 @@ vpn_client/
 - Empty state with "Click to Connect" overlay
 
 ### VpnAuthDialog.js
+
 - Email and password input fields
 - "Simpan" checkbox for email (appends to `.ovpn` file)
 - "Simpan Password" checkbox (saves to localStorage)
@@ -197,6 +215,7 @@ vpn_client/
 - Form validation
 
 ### SudoPasswordDialog.js
+
 - System password input (for initial setup)
 - Password validation
 - Keychain integration
@@ -204,11 +223,13 @@ vpn_client/
 - User-friendly welcome message
 
 ### RenameDialog.js
+
 - Server name editing
 - Input validation
 - File rename operation
 
 ### OpenVpnWarning.js
+
 - Warning banner displayed when OpenVPN is not installed
 - Platform-specific installation guide links
 - "Check Again" button for re-checking OpenVPN installation
@@ -226,16 +247,18 @@ vpn_client/
 ## Key Features Details
 
 ### System Password Management
+
 - **Platform-Specific Handling**:
   - **Windows**: No sudo password required (uses UAC/elevation when needed)
   - **Linux/macOS**: System password stored securely in system keychain (macOS Keychain, Linux Secret Service)
 - Password is validated and refreshed before each VPN connection (Linux/macOS only)
-- Directory `~/.vpn_client` is created automatically on first run
+- Directory `~/.rcp-network` is created automatically on first run
   - **Windows**: Created without requiring admin password
   - **Linux/macOS**: May require system password for initial setup
-- User-friendly dialog with "Welcome to VPN Client" message for first-time users (Linux/macOS only)
+- User-friendly dialog with "Welcome to RCP Network" message for first-time users (Linux/macOS only)
 
 ### VPN Connection Flow
+
 1. Application checks for OpenVPN installation on startup
 2. If OpenVPN is not installed, warning banner is displayed with installation guide
 3. User selects a VPN server from the list
@@ -248,6 +271,7 @@ vpn_client/
 8. Statistics and activity log are updated
 
 ### OpenVPN Detection Flow
+
 1. Application checks for OpenVPN on startup using platform-specific detection:
    - **Windows**: Uses `where openvpn` and checks common installation paths
    - **Linux**: Uses `which openvpn` and checks standard Linux paths
@@ -260,13 +284,15 @@ vpn_client/
    - User can click "Check Again" after installing OpenVPN
 
 ### File Processing
+
 - When a `.ovpn` file is imported, the application automatically:
   - Removes `client-cert-not-required` configuration
   - Removes `verify-client-cert none` configuration
-  - Copies file to `~/.vpn_client` directory
+  - Copies file to `~/.rcp-network` directory
   - Handles duplicate file names with timestamp
 
 ### Multiple Connections
+
 - The application supports multiple simultaneous VPN connections
 - Each connection is tracked independently
 - Connection status is displayed per server in the list
@@ -277,7 +303,7 @@ vpn_client/
 ## Security
 
 - **Keychain Storage**: System passwords stored securely in system keychain
-- **File Isolation**: All VPN files stored in dedicated directory (`~/.vpn_client`)
+- **File Isolation**: All VPN files stored in dedicated directory (`~/.rcp-network`)
 - **Password Handling**: Passwords never stored in plain text files
 - **IPC Security**: Context isolation enabled, no node integration in renderer
 

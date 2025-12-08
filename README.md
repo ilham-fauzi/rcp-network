@@ -7,7 +7,9 @@ A modern VPN Client desktop application built with Electron, React, and Tailwind
 ### Core Functionality
 - **Dark Mode UI**: Beautiful dark-themed interface with modern design
 - **Two-Panel Layout**: Sidebar for server management and main content for connection control
+- **Cross-Platform Support**: Full support for Windows, Linux, and macOS with platform-specific handling
 - **OpenVPN Integration**: Full support for OpenVPN configuration files (`.ovpn`)
+- **OpenVPN Detection**: Proactive detection of OpenVPN installation with warning banner and installation guide
 - **Multiple Connections**: Support for multiple simultaneous VPN connections
 - **Secure Storage**: System password stored securely in system keychain using `keytar`
 
@@ -37,16 +39,41 @@ A modern VPN Client desktop application built with Electron, React, and Tailwind
 - **Activity Log**: Scrollable log area tracking all connection activities
 
 ### File Management
-- **Automatic Directory Creation**: Creates `~/.vpn_client` directory automatically (requires system password on first run)
-- **File Storage**: All `.ovpn` files stored securely in `~/.vpn_client` directory
+- **Automatic Directory Creation**: Creates `~/.vpn_client` directory automatically (requires system password on first run for Linux/macOS, not required for Windows)
+- **File Storage**: All `.ovpn` files stored securely in `~/.vpn_client` directory (cross-platform path handling)
 - **File Operations**: Copy, rename, and delete operations for VPN configuration files
+
+### Cross-Platform Support
+- **Windows Support**: 
+  - No sudo password required (uses UAC/elevation)
+  - Automatic detection of OpenVPN in common installation paths
+  - Uses `taskkill` for process management
+- **Linux Support**:
+  - Sudo password validation and storage
+  - Support for multiple package managers (apt, yum, pacman, etc.)
+  - Automatic detection of OpenVPN in standard Linux paths
+- **macOS Support**:
+  - Sudo password validation and storage
+  - Support for Homebrew (Intel and Apple Silicon)
+  - Automatic detection of OpenVPN in Homebrew and system paths
+
+### OpenVPN Detection
+- **Proactive Detection**: Automatically checks for OpenVPN installation on application startup
+- **Warning Banner**: Displays prominent warning banner if OpenVPN is not installed
+- **Platform-Specific Guides**: Provides installation guide links specific to user's operating system
+- **Check Again Button**: Allows users to re-check OpenVPN installation after installing
+- **Connection Prevention**: Disables connect button when OpenVPN is not detected
 
 ## Installation
 
 ### Prerequisites
 - Node.js (v20-24 recommended)
 - npm or yarn
-- macOS, Linux, or Windows
+- **OpenVPN**: Must be installed on your system
+  - **Windows**: Download from [OpenVPN Community Downloads](https://openvpn.net/community-downloads/)
+  - **Linux**: Install via package manager (e.g., `sudo apt install openvpn` or `sudo yum install openvpn`)
+  - **macOS**: Install via Homebrew (`brew install openvpn`) or download from [OpenVPN Community Downloads](https://openvpn.net/community-downloads/)
+- Supported Operating Systems: macOS, Linux, or Windows
 
 ### Steps
 
@@ -124,7 +151,8 @@ vpn_client/
 │   │   ├── TrafficChart.js      # Time-series traffic visualization
 │   │   ├── VpnAuthDialog.js     # VPN authentication dialog
 │   │   ├── SudoPasswordDialog.js # System password input dialog (initial setup)
-│   │   └── RenameDialog.js      # Server rename dialog
+│   │   ├── RenameDialog.js      # Server rename dialog
+│   │   └── OpenVpnWarning.js    # OpenVPN installation warning banner
 │   ├── App.js           # Main app component (state management, routing)
 │   ├── index.js         # React entry point
 │   └── index.css        # Tailwind CSS imports
@@ -180,6 +208,12 @@ vpn_client/
 - Input validation
 - File rename operation
 
+### OpenVpnWarning.js
+- Warning banner displayed when OpenVPN is not installed
+- Platform-specific installation guide links
+- "Check Again" button for re-checking OpenVPN installation
+- Prominent yellow warning design with clear messaging
+
 ## Technologies
 
 - **Electron**: Desktop application framework
@@ -192,18 +226,38 @@ vpn_client/
 ## Key Features Details
 
 ### System Password Management
-- System password is stored securely in system keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service)
-- Password is validated and refreshed before each VPN connection
-- Directory `~/.vpn_client` is created automatically on first run (requires system password for initial setup)
-- User-friendly dialog with "Welcome to VPN Client" message for first-time users
+- **Platform-Specific Handling**:
+  - **Windows**: No sudo password required (uses UAC/elevation when needed)
+  - **Linux/macOS**: System password stored securely in system keychain (macOS Keychain, Linux Secret Service)
+- Password is validated and refreshed before each VPN connection (Linux/macOS only)
+- Directory `~/.vpn_client` is created automatically on first run
+  - **Windows**: Created without requiring admin password
+  - **Linux/macOS**: May require system password for initial setup
+- User-friendly dialog with "Welcome to VPN Client" message for first-time users (Linux/macOS only)
 
 ### VPN Connection Flow
-1. User selects a VPN server from the list
-2. Authentication dialog appears (email and password)
-3. User can choose to save email (appends to `.ovpn` file) and/or password (localStorage)
-4. Connection is established using system privileges with `openvpn` command
-5. Real-time traffic monitoring begins
-6. Statistics and activity log are updated
+1. Application checks for OpenVPN installation on startup
+2. If OpenVPN is not installed, warning banner is displayed with installation guide
+3. User selects a VPN server from the list
+4. Authentication dialog appears (email and password)
+5. User can choose to save email (appends to `.ovpn` file) and/or password (localStorage)
+6. Connection is established using OpenVPN command:
+   - **Windows**: Direct execution (no sudo required)
+   - **Linux/macOS**: Execution with sudo privileges
+7. Real-time traffic monitoring begins
+8. Statistics and activity log are updated
+
+### OpenVPN Detection Flow
+1. Application checks for OpenVPN on startup using platform-specific detection:
+   - **Windows**: Uses `where openvpn` and checks common installation paths
+   - **Linux**: Uses `which openvpn` and checks standard Linux paths
+   - **macOS**: Uses `which openvpn` and checks Homebrew paths
+2. If OpenVPN is found, application proceeds normally
+3. If OpenVPN is not found:
+   - Warning banner is displayed at the top of the application
+   - Connect button is disabled
+   - Platform-specific installation guide link is provided
+   - User can click "Check Again" after installing OpenVPN
 
 ### File Processing
 - When a `.ovpn` file is imported, the application automatically:
@@ -216,6 +270,9 @@ vpn_client/
 - The application supports multiple simultaneous VPN connections
 - Each connection is tracked independently
 - Connection status is displayed per server in the list
+- Platform-specific process management:
+  - **Windows**: Uses `taskkill` to terminate OpenVPN processes
+  - **Linux/macOS**: Uses `pkill` with sudo privileges
 
 ## Security
 

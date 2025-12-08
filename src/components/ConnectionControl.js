@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import VpnAuthDialog from './VpnAuthDialog';
 import TrafficChart from './TrafficChart';
 
-const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChange, triggerConnect }) => {
+const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChange, triggerConnect, openvpnInstalled = true }) => {
   const isConnected = selectedServer ? connectedServers.has(selectedServer.id) : false;
   const [isConnecting, setIsConnecting] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
@@ -91,6 +91,12 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
 
   const handleToggleConnection = () => {
     if (isConnecting) return;
+    
+    // Disable if OpenVPN is not installed
+    if (!openvpnInstalled && !isConnected) {
+      alert('OpenVPN is not installed. Please install OpenVPN to connect to VPN servers.');
+      return;
+    }
 
     if (isConnected) {
       // Disconnect
@@ -228,12 +234,13 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
         </div>
         <button
           onClick={handleToggleConnection}
-          disabled={isConnecting}
+          disabled={isConnecting || (!openvpnInstalled && !isConnected)}
           className={`px-4 py-2 rounded-lg font-medium transition-colors ${
             isConnected
               ? 'bg-red-600 hover:bg-red-700 text-white'
               : 'bg-gray-700 hover:bg-gray-600 text-gray-100'
           } disabled:opacity-50 disabled:cursor-not-allowed`}
+          title={!openvpnInstalled && !isConnected ? 'OpenVPN is not installed' : ''}
         >
           {isConnected ? 'Disconnect' : 'Connect'}
         </button>

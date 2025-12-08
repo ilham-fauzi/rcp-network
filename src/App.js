@@ -3,6 +3,7 @@ import ServerList from './components/ServerList';
 import ConnectionControl from './components/ConnectionControl';
 import SudoPasswordDialog from './components/SudoPasswordDialog';
 import RenameDialog from './components/RenameDialog';
+import OpenVpnWarning from './components/OpenVpnWarning';
 
 // Storage utility
 const STORAGE_KEY = 'vpn-servers';
@@ -54,6 +55,7 @@ function App() {
   const [showRenameDialog, setShowRenameDialog] = useState(false);
   const [serverToRename, setServerToRename] = useState(null);
   const [triggerConnect, setTriggerConnect] = useState(null); // Trigger connection from list
+  const [openvpnStatus, setOpenvpnStatus] = useState({ installed: true, checking: true, platform: null, installationGuide: null });
 
   // Load servers from storage on mount
   useEffect(() => {
@@ -91,6 +93,36 @@ function App() {
     };
 
     checkDirectoryAndPassword();
+    
+    // Check OpenVPN installation
+    const checkOpenVpn = async () => {
+      if (!window.electronAPI) {
+        // Not in Electron, skip
+        setOpenvpnStatus({ installed: true, checking: false, platform: null, installationGuide: null });
+        return;
+      }
+
+      try {
+        setOpenvpnStatus(prev => ({ ...prev, checking: true }));
+        const result = await window.electronAPI.checkOpenVpnInstalled();
+        setOpenvpnStatus({
+          installed: result.installed,
+          checking: false,
+          platform: result.platform,
+          installationGuide: result.installationGuide
+        });
+      } catch (error) {
+        console.error('Error checking OpenVPN:', error);
+        setOpenvpnStatus({
+          installed: false,
+          checking: false,
+          platform: 'Unknown',
+          installationGuide: 'https://openvpn.net/community-downloads/'
+        });
+      }
+    };
+
+    checkOpenVpn();
   }, []);
 
   // Save servers to storage whenever servers change (but not on initial load)
@@ -304,9 +336,38 @@ function App() {
     setSudoPasswordChecked(); // Mark as checked so dialog doesn't show again
   };
 
+  const handleCheckOpenVpnAgain = async () => {
+    if (!window.electronAPI) return;
+    
+    try {
+      setOpenvpnStatus(prev => ({ ...prev, checking: true }));
+      const result = await window.electronAPI.checkOpenVpnInstalled();
+      setOpenvpnStatus({
+        installed: result.installed,
+        checking: false,
+        platform: result.platform,
+        installationGuide: result.installationGuide
+      });
+    } catch (error) {
+      console.error('Error checking OpenVPN:', error);
+    }
+  };
+
   return (
     <>
       <div className="h-screen w-screen flex bg-gray-900 overflow-hidden">
+        {/* OpenVPN Warning Banner */}
+        {!openvpnStatus.installed && !openvpnStatus.checking && (
+          <div className="absolute top-0 left-0 right-0 z-50 px-4 pt-4">
+            <OpenVpnWarning
+              isVisible={true}
+              platform={openvpnStatus.platform}
+              installationGuide={openvpnStatus.installationGuide}
+              onCheckAgain={handleCheckOpenVpnAgain}
+            />
+          </div>
+        )}
+        
         {/* Sidebar - 25-30% width */}
         <div className="w-1/4 min-w-[280px] max-w-[320px] border-r border-gray-800">
         <ServerList
@@ -330,6 +391,7 @@ function App() {
             selectedServer={selectedServer} 
             connectedServers={connectedServers}
             triggerConnect={triggerConnect}
+            openvpnInstalled={openvpnStatus.installed}
             onConnectionChange={(serverId, isConnected) => {
               setConnectedServers(prev => {
                 const newSet = new Set(prev);

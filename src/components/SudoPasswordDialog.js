@@ -67,7 +67,7 @@ const SudoPasswordDialog = ({ onPasswordSubmit, onCancel, isVisible }) => {
             </svg>
           </div>
           <div>
-            <h2 className="text-xl font-bold text-gray-100">Welcome to VPN Client</h2>
+            <h2 className="text-xl font-bold text-gray-100">Welcome to RCP Network</h2>
             <p className="text-sm text-gray-400">
               We need your system password to complete the initial setup
             </p>

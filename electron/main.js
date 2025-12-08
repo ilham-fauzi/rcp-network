@@ -9,7 +9,7 @@ const keytar = require('keytar');
 const isDev = process.env.ELECTRON_IS_DEV === '1';
 
 // App configuration (must be defined before LOG_FILE)
-const APP_NAME = app.getName() || 'vpn_client';
+const APP_NAME = app.getName() || 'rcp-network';
 const VPN_DIRECTORY = path.join(os.homedir(), `.${APP_NAME}`);
 const KEYCHAIN_SERVICE = `${APP_NAME}_sudo_password`;
 const KEYCHAIN_ACCOUNT = 'sudo_password';
@@ -139,7 +139,7 @@ function createWindow() {
     <body>
       <div class="loader">
         <div class="spinner"></div>
-        <div class="text">Loading VPN Client...</div>
+        <div class="text">Loading RCP Network...</div>
       </div>
     </body>
     </html>

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Start VPN Client in development mode
+# Start RCP Network in development mode
 # This script ensures React server is ready before starting Electron
 
 cd "$(dirname "$0")"

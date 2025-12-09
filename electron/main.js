@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, dialog, globalShortcut } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -7,6 +8,10 @@ const { promisify } = require('util');
 const execAsync = promisify(exec);
 const keytar = require('keytar');
 const isDev = process.env.ELECTRON_IS_DEV === '1';
+
+// Configure autoUpdater
+autoUpdater.logger = require('electron-log');
+autoUpdater.logger.transports.file.level = 'info';
 
 // App configuration (must be defined before LOG_FILE)
 const APP_NAME = app.getName() || 'rcp-network';
@@ -82,6 +87,40 @@ function getIconPath() {
 
 let mainWindow = null;
 
+// Auto-update logic
+function setupAutoUpdater(win) {
+  autoUpdater.on('checking-for-update', () => {
+    autoUpdater.logger.info('Checking for updates...');
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    autoUpdater.logger.info('Update available: ' + info.version);
+    win.webContents.send('update-available', info);
+  });
+
+  autoUpdater.on('update-not-available', (info) => {
+    autoUpdater.logger.info('Update not available.');
+  });
+
+  autoUpdater.on('error', (err) => {
+    autoUpdater.logger.error('Error in auto-updater: ' + err);
+    win.webContents.send('update-error', err.message);
+  });
+
+  autoUpdater.on('download-progress', (progressObj) => {
+    let log_message = "Download speed: " + progressObj.bytesPerSecond;
+    log_message = log_message + ' - Downloaded ' + progressObj.percent + '%';
+    log_message = log_message + ' (' + progressObj.transferred + "/" + progressObj.total + ')';
+    autoUpdater.logger.info(log_message);
+    win.webContents.send('update-progress', progressObj);
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    autoUpdater.logger.info('Update downloaded');
+    win.webContents.send('update-downloaded', info);
+  });
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1200,
@@ -102,6 +141,18 @@ function createWindow() {
   });
   
   mainWindow = win;
+  
+  // Setup auto-updater
+  setupAutoUpdater(win);
+  
+  // Check for updates when window is shown
+  win.once('ready-to-show', () => {
+      // Small delay to ensure UI is ready to receive events if needed
+      setTimeout(() => {
+        autoUpdater.checkForUpdatesAndNotify();
+      }, 3000);
+      win.show();
+  });
 
   // Show loading indicator immediately
   const loadingHTML = `
@@ -152,7 +203,6 @@ function createWindow() {
     </html>
   `;
   win.loadURL(`data:text/html,${encodeURIComponent(loadingHTML)}`);
-  win.show(); // Show window with loading indicator
 
   // Load the app
   if (isDev) {
@@ -1412,6 +1462,10 @@ ipcMain.handle('get-active-connections', async () => {
       };
    }
    return connections;
+});
+
+ipcMain.handle('get-app-version', () => {
+  return app.getVersion();
 });
 
 // Disconnect VPN (specific server or all)

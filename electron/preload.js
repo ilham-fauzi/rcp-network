@@ -15,5 +15,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getActiveConnections: () => ipcRenderer.invoke('get-active-connections'),
   onVpnDisconnected: (callback) => ipcRenderer.on('vpn-disconnected', callback),
   removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel),
+  onUpdateAvailable: (callback) => ipcRenderer.on('update-available', callback),
+  onUpdateProgress: (callback) => ipcRenderer.on('update-progress', callback),
+  onUpdateDownloaded: (callback) => ipcRenderer.on('update-downloaded', callback),
+  onUpdateError: (callback) => ipcRenderer.on('update-error', callback),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
 });
 

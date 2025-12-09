@@ -17,6 +17,14 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
   const [savedPassword, setSavedPassword] = useState(null);
   const [downloadSpeed, setDownloadSpeed] = useState(0);
   const [uploadSpeed, setUploadSpeed] = useState(0);
+  const [appVersion, setAppVersion] = useState('1.0.0');
+
+  useEffect(() => {
+     if (window.electronAPI) {
+         window.electronAPI.getAppVersion().then(setAppVersion).catch(console.error);
+     }
+  }, []);
+
 
   // Load saved email and password for selected server
   useEffect(() => {
@@ -301,10 +309,10 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
       {/* Footer */}
       <div className="p-4 border-t border-gray-800 flex items-center justify-between text-xs text-gray-500">
         <div>
-          <p>Version 1.0.0</p>
+          <p>RCP Network Desktop</p>
         </div>
         <div>
-          <p>Last updated: {new Date().toLocaleDateString()}</p>
+          <p>Version {appVersion}</p>
         </div>
       </div>
 

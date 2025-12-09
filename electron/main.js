@@ -25,7 +25,10 @@ const originalWarn = console.warn;
 // Create log function (use original console methods to avoid infinite loop)
 const logToFile = (level, message, ...args) => {
   const timestamp = new Date().toISOString();
-  const logMessage = `[${timestamp}] [${level}] ${message} ${args.length > 0 ? JSON.stringify(args) : ''}\n`;
+  const formattedArgs = args.length > 0 ? args.map(arg => 
+    (typeof arg === 'string') ? arg : JSON.stringify(arg)
+  ).join(' ') : '';
+  const logMessage = `[${timestamp}] [${level}] ${message} ${formattedArgs}\n`;
   
   try {
     // Ensure directory exists before writing
@@ -1092,20 +1095,189 @@ ipcMain.handle('connect-vpn', async (event, data) => {
     }
     
     // Build command based on platform
+    // Check if running as Admin on Windows
+    const isWindowsAdmin = async () => {
+       try {
+         // 'net session' requires Admin privileges. Returns 0 if admin, != 0 if not.
+         await execAsync('net session');
+         return true;
+       } catch (e) {
+         return false;
+       }
+    };
+
+    // Build command based on platform
     const escapedOpenvpnPath = openvpnPath.replace(/'/g, "'\\''");
+    
+    // Windows Logic
+    if (isWindows()) {
+      const isAdmin = await isWindowsAdmin();
+      
+      if (isAdmin) {
+         // ALREADY ADMIN: Run directly using standard child_process.spawn/exec
+         // No UAC prompt needed because we inherit permissions.
+         
+         const winOpenVpn = openvpnPath;
+         const winConfig = filePath;
+         const winAuth = tempAuthFile;
+         
+         // Standard execution
+         const command = `"${winOpenVpn}" --config "${winConfig}" --auth-user-pass "${winAuth}"`;
+         
+         logToFile('INFO', 'Executing OpenVPN command (Already Admin)...');
+         
+         const execOptions = {
+            cwd: VPN_DIRECTORY,
+            detached: true,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            shell: true,
+            env: { ...process.env }
+         };
+         
+         // Start process
+         const openvpnProcess = exec(command, execOptions, (error, stdout, stderr) => {
+             if (serverId && openvpnProcesses.has(serverId)) {
+                 openvpnProcesses.delete(serverId);
+             }
+         });
+         
+         // Handle logs
+         if (openvpnProcess.stdout) {
+             openvpnProcess.stdout.on('data', d => console.log('OpenVPN stdout:', d.toString()));
+         }
+         if (openvpnProcess.stderr) {
+             openvpnProcess.stderr.on('data', d => console.error('OpenVPN stderr:', d.toString()));
+         }
+         
+         if (!openvpnProcess.pid) {
+              return { success: false, error: 'Failed to start OpenVPN process.' };
+         }
+         
+         console.log('OpenVPN process started with PID:', openvpnProcess.pid);
+         openvpnProcess.unref();
+         
+         if (serverId) {
+              openvpnProcesses.set(serverId, {
+                process: openvpnProcess,
+                filePath: filePath,
+                tempAuthFile: tempAuthFile
+              });
+         }
+         
+         return { success: true, message: 'VPN connection started (Admin Mode)', serverId: serverId };
+
+      } else {
+          // NOT ADMIN: Must trigger UAC via PowerShell Start-Process -Verb RunAs
+          // This allows users to "Connect" -> Accept UAC -> Connected.
+          // They cannot "save" this permission permanently unless they run the App itself as Admin.
+
+          const logPath = path.join(VPN_DIRECTORY, `openvpn_${serverId || Date.now()}.log`);
+          
+          if (fs.existsSync(logPath)) {
+            try { fs.unlinkSync(logPath); } catch (e) {}
+          }
+
+          const winOpenVpn = openvpnPath;
+          const winConfig = filePath;
+          const winAuth = tempAuthFile;
+
+          const openVpnArgs = `--config "${winConfig}" --auth-user-pass "${winAuth}"`;
+
+          const psCommand = `
+            $p = Start-Process "${winOpenVpn}" -ArgumentList '${openVpnArgs}' -Verb RunAs -PassThru -RedirectStandardOutput "${logPath}" -RedirectStandardError "${logPath}" -WindowStyle Hidden;
+            if ($p) { Write-Output $p.Id } else { exit 1 }
+          `.replace(/\n/g, ' ').trim();
+
+          logToFile('INFO', 'Executing elevated OpenVPN command (Requesting UAC)...', psCommand);
+          logToFile('INFO', 'Log file:', logPath);
+
+          try {
+            const { stdout, stderr } = await execAsync(`powershell -Command "${psCommand}"`);
+            
+            const pid = parseInt(stdout.trim());
+            if (!pid || isNaN(pid)) {
+              throw new Error('Failed to get PID from elevated process');
+            }
+
+            console.log('OpenVPN process started with PID (elevated):', pid);
+
+            // Log tailing
+            let lastSize = 0;
+            const logPoller = setInterval(() => {
+              try {
+                if (fs.existsSync(logPath)) {
+                  const stats = fs.statSync(logPath);
+                  if (stats.size > lastSize) {
+                    const stream = fs.createReadStream(logPath, { start: lastSize, end: stats.size });
+                    stream.on('data', chunk => {
+                      console.log('OpenVPN stdout:', chunk.toString());
+                    });
+                    lastSize = stats.size;
+                  }
+                }
+              } catch (e) {}
+            }, 500);
+
+            // Monitor exit
+            const exitMonitor = setInterval(async () => {
+                 try {
+                    const { stdout } = await execAsync(`tasklist /FI "PID eq ${pid}" /NH`);
+                    if (!stdout.includes(pid.toString())) {
+                        clearInterval(exitMonitor);
+                        clearInterval(logPoller);
+                        if (serverId && openvpnProcesses.has(serverId)) {
+                            openvpnProcesses.delete(serverId);
+                            try { fs.unlinkSync(tempAuthFile); } catch(e) {}
+                        }
+                    }
+                 } catch (e) {}
+            }, 2000);
+
+            if (serverId) {
+              openvpnProcesses.set(serverId, {
+                process: {
+                  pid: pid,
+                  kill: () => {
+                    clearInterval(logPoller);
+                    clearInterval(exitMonitor);
+                  },
+                  unref: () => {}
+                },
+                filePath: filePath,
+                tempAuthFile: tempAuthFile,
+                logPath: logPath 
+              });
+            }
+            
+            return { success: true, message: 'VPN connection started (Elevated)', serverId: serverId };
+
+          } catch (error) {
+            logToFile('ERROR', 'Failed to start elevated process:', error.message);
+            
+            // Helpful error if PowerShell is missing or blocked
+            if (error.message && (error.message.toLowerCase().includes('powershell') || error.message.includes('not recognized'))) {
+                 return { 
+                   success: false, 
+                   error: 'PowerShell is required for auto-elevation. Please restart the app as Administrator.' 
+                 };
+            }
+            
+            return { 
+              success: false, 
+              error: 'Failed to start OpenVPN as Admin. Please accept the UAC prompt or run the App as Administrator.' 
+            };
+          }
+      }
+    } 
+
+    // Linux/macOS Implementation
     let command;
     let envPath;
     
-    if (isWindows()) {
-      // Windows: no sudo needed, direct execution
-      envPath = process.env.PATH || '';
-      command = `"${escapedOpenvpnPath}" --config "${escapedFilePath}" --auth-user-pass "${escapedAuthFile}"`;
-    } else {
-      // Linux/macOS: use sudo
-      const escapedPassword = validatedSudoPassword.replace(/'/g, "'\\''").replace(/\$/g, '\\$').replace(/`/g, '\\`');
-      envPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin';
-      command = `echo '${escapedPassword}' | sudo -S '${escapedOpenvpnPath}' --config '${escapedFilePath}' --auth-user-pass '${escapedAuthFile}'`;
-    }
+    // Linux/macOS: use sudo
+    const escapedPassword = validatedSudoPassword.replace(/'/g, "'\\''").replace(/\$/g, '\\$').replace(/`/g, '\\`');
+    envPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin';
+    command = `echo '${escapedPassword}' | sudo -S '${escapedOpenvpnPath}' --config '${escapedFilePath}' --auth-user-pass '${escapedAuthFile}'`;
 
     logToFile('INFO', 'Executing OpenVPN command...');
     logToFile('INFO', 'OpenVPN path:', openvpnPath);
@@ -1119,14 +1291,9 @@ ipcMain.handle('connect-vpn', async (event, data) => {
       stdio: ['ignore', 'pipe', 'pipe'], // Capture stdout and stderr for debugging
       env: {
         ...process.env,
-        PATH: envPath  // Use the expanded PATH with all common locations
+        PATH: envPath
       }
     };
-    
-    // Add shell option for Windows
-    if (isWindows()) {
-      execOptions.shell = true;
-    }
     
     const openvpnProcess = exec(command, execOptions, (error, stdout, stderr) => {
       if (error) {
@@ -1206,6 +1373,11 @@ ipcMain.handle('disconnect-vpn', async (event, serverId) => {
         // Disconnect specific server
         const processInfo = openvpnProcesses.get(serverId);
         if (processInfo && processInfo.process && processInfo.process.pid) {
+          // Cleanup custom process handlers (pollers)
+          if (processInfo.process.kill) {
+             try { processInfo.process.kill(); } catch (e) {}
+          }
+
           try {
             await execAsync(`taskkill /F /PID ${processInfo.process.pid}`, { 
               timeout: 5000,
@@ -1224,6 +1396,11 @@ ipcMain.handle('disconnect-vpn', async (event, serverId) => {
               console.error('Error deleting temp auth file:', e);
             }
           }
+
+          // Clean up log file if exists (from elevated process)
+          if (processInfo.logPath && fs.existsSync(processInfo.logPath)) {
+            try { fs.unlinkSync(processInfo.logPath); } catch (e) {}
+          }
           
           openvpnProcesses.delete(serverId);
           return { success: true, message: 'VPN disconnected' };
@@ -1233,6 +1410,16 @@ ipcMain.handle('disconnect-vpn', async (event, serverId) => {
       } else {
         // Disconnect all VPNs
         if (openvpnProcesses.size > 0) {
+          // Cleanup all processes including pollers
+          for (const [id, processInfo] of openvpnProcesses.entries()) {
+             if (processInfo.process && processInfo.process.kill) {
+                 try { processInfo.process.kill(); } catch (e) {}
+             }
+             if (processInfo.logPath && fs.existsSync(processInfo.logPath)) {
+                 try { fs.unlinkSync(processInfo.logPath); } catch(e) {}
+             }
+          }
+
           try {
             await execAsync('taskkill /F /IM openvpn.exe', { 
               timeout: 5000,

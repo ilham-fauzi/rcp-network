@@ -12,5 +12,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   disconnectVpn: (serverId) => ipcRenderer.invoke('disconnect-vpn', serverId),
   deleteVpnFile: (filePath) => ipcRenderer.invoke('delete-vpn-file', filePath),
   renameVpnFile: (filePath, newName) => ipcRenderer.invoke('rename-vpn-file', filePath, newName),
+  getActiveConnections: () => ipcRenderer.invoke('get-active-connections'),
+  onVpnDisconnected: (callback) => ipcRenderer.on('vpn-disconnected', callback),
+  removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel),
 });
 

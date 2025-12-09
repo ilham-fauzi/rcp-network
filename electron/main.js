@@ -80,6 +80,8 @@ function getIconPath() {
   }
 }
 
+let mainWindow = null;
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1200,
@@ -98,6 +100,8 @@ function createWindow() {
     frame: true,
     icon: getIconPath(),
   });
+  
+  mainWindow = win;
 
   // Show loading indicator immediately
   const loadingHTML = `
@@ -1160,8 +1164,19 @@ ipcMain.handle('connect-vpn', async (event, data) => {
               openvpnProcesses.set(serverId, {
                 process: openvpnProcess,
                 filePath: filePath,
-                tempAuthFile: tempAuthFile
+                tempAuthFile: tempAuthFile,
+                startTime: Date.now()
               });
+
+              openvpnProcess.on('exit', (code, signal) => {
+                if (openvpnProcesses.has(serverId)) {
+                    openvpnProcesses.delete(serverId);
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('vpn-disconnected', { serverId, reason: `Process exited with code ${code}` });
+                    }
+                    try { fs.unlinkSync(tempAuthFile); } catch(e) {}
+                }
+             });
          }
          
          return { success: true, message: 'VPN connection started (Admin Mode)', serverId: serverId };
@@ -1227,6 +1242,9 @@ ipcMain.handle('connect-vpn', async (event, data) => {
                         clearInterval(logPoller);
                         if (serverId && openvpnProcesses.has(serverId)) {
                             openvpnProcesses.delete(serverId);
+                            if (mainWindow && !mainWindow.isDestroyed()) {
+                                mainWindow.webContents.send('vpn-disconnected', { serverId, reason: 'Elevated process exited' });
+                            }
                             try { fs.unlinkSync(tempAuthFile); } catch(e) {}
                         }
                     }
@@ -1245,7 +1263,8 @@ ipcMain.handle('connect-vpn', async (event, data) => {
                 },
                 filePath: filePath,
                 tempAuthFile: tempAuthFile,
-                logPath: logPath 
+                logPath: logPath,
+                startTime: Date.now()
               });
             }
             
@@ -1353,7 +1372,26 @@ ipcMain.handle('connect-vpn', async (event, data) => {
       openvpnProcesses.set(serverId, {
         process: openvpnProcess,
         filePath: filePath,
-        tempAuthFile: tempAuthFile
+        tempAuthFile: tempAuthFile,
+        startTime: Date.now()
+      });
+      
+      // Monitor process exit
+      openvpnProcess.on('exit', (code, signal) => {
+        console.log(`OpenVPN process exited with code ${code} and signal ${signal}`);
+        if (openvpnProcesses.has(serverId)) {
+           // If it's still in the map, it means it crashed or exited unexpectedly
+           openvpnProcesses.delete(serverId);
+           // Notify frontend
+           if (mainWindow && !mainWindow.isDestroyed()) {
+             mainWindow.webContents.send('vpn-disconnected', { 
+               serverId, 
+               reason: `Process exited with code ${code}` 
+             });
+           }
+           // Cleanup
+           try { fs.unlinkSync(tempAuthFile); } catch(e) {}
+        }
       });
     }
 
@@ -1362,6 +1400,18 @@ ipcMain.handle('connect-vpn', async (event, data) => {
     console.error('Error connecting VPN:', error);
     return { success: false, error: error.message || 'Failed to connect VPN' };
   }
+});
+
+// Get active connections with duration
+ipcMain.handle('get-active-connections', async () => {
+   const connections = {};
+   for (const [id, info] of openvpnProcesses.entries()) {
+      connections[id] = {
+         startTime: info.startTime,
+         duration: Date.now() - info.startTime
+      };
+   }
+   return connections;
 });
 
 // Disconnect VPN (specific server or all)
@@ -1405,6 +1455,7 @@ ipcMain.handle('disconnect-vpn', async (event, serverId) => {
           openvpnProcesses.delete(serverId);
           return { success: true, message: 'VPN disconnected' };
         } else {
+          openvpnProcesses.delete(serverId); // Ensure removed even if pid missing
           return { success: false, error: 'VPN connection not found' };
         }
       } else {
@@ -1475,6 +1526,7 @@ ipcMain.handle('disconnect-vpn', async (event, serverId) => {
           openvpnProcesses.delete(serverId);
           return { success: true, message: 'VPN disconnected' };
         } else {
+          openvpnProcesses.delete(serverId);
           return { success: false, error: 'VPN connection not found' };
         }
       } else {
@@ -1517,19 +1569,32 @@ ipcMain.handle('delete-vpn-file', async (event, filePath) => {
       return { success: false, error: 'File path is required' };
     }
 
-    // Verify file exists
-    if (!fs.existsSync(filePath)) {
-      return { success: false, error: 'File not found' };
-    }
+    logToFile('INFO', 'Attempting to delete file:', filePath);
+    
+    // Normalize paths to fix potential delimiter issues
+    const normalizedPath = path.normalize(filePath);
+    const normalizedVpnDir = path.normalize(VPN_DIRECTORY);
 
     // Verify file is in VPN directory (security check)
-    if (!filePath.startsWith(VPN_DIRECTORY)) {
+    // Use startsWith checking, but ensure case safety on Windows if needed
+    if (!normalizedPath.startsWith(normalizedVpnDir)) {
+      console.error('Security check failed:', normalizedPath, 'not in', normalizedVpnDir);
       return { success: false, error: 'File is not in VPN directory' };
+    }
+
+    // Verify file exists
+    if (!fs.existsSync(normalizedPath)) {
+      console.error('File not found at:', normalizedPath);
+      // If file is gone, we can consider it "deleted" from the user's perspective
+      // But let's return error so UI knows it was already gone (or maybe just success)
+      // User complaint: "error shown file/config not available"
+      // Let's assume they want it gone. If it's gone, it's success.
+      return { success: true, message: 'File already deleted or not found' };
     }
 
     // Delete the file
     try {
-      fs.unlinkSync(filePath);
+      fs.unlinkSync(normalizedPath);
       return { success: true, message: 'File deleted successfully' };
     } catch (error) {
       console.error('Error deleting file:', error);

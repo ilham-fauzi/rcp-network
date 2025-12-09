@@ -12,10 +12,33 @@ import {
   Legend
 } from 'recharts';
 
-const TrafficChart = ({ isConnected, downloadSpeed, uploadSpeed, onConnectClick }) => {
+const formatDuration = (ms) => {
+  const seconds = Math.floor(ms / 1000);
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  
+  const pad = (n) => n.toString().padStart(2, '0');
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+};
+
+const TrafficChart = ({ isConnected, downloadSpeed, uploadSpeed, onConnectClick, startTime }) => {
   const [data, setData] = useState([]);
+  const [duration, setDuration] = useState(0);
   const intervalRef = useRef(null);
   const timeRef = useRef(0);
+
+  useEffect(() => {
+    if (isConnected && startTime) {
+      const timer = setInterval(() => {
+        setDuration(Date.now() - startTime);
+      }, 1000);
+      setDuration(Date.now() - startTime); // Initial set
+      return () => clearInterval(timer);
+    } else {
+      setDuration(0);
+    }
+  }, [isConnected, startTime]);
 
   useEffect(() => {
     if (isConnected) {
@@ -181,6 +204,13 @@ const TrafficChart = ({ isConnected, downloadSpeed, uploadSpeed, onConnectClick 
             </AreaChart>
           </ResponsiveContainer>
           
+          {/* Duration Overlay */}
+          <div className="absolute top-4 right-4 pointer-events-none z-0">
+             <span className="text-4xl font-bold text-gray-300/50 select-none font-mono">
+                {formatDuration(duration)}
+             </span>
+          </div>
+
           {/* Disconnect Button Overlay - Center of Chart */}
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
             <button

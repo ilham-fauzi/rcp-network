@@ -1,6 +1,29 @@
 import React, { useState } from 'react';
 
-const ServerListItem = ({ server, onSelect, onInfo, onDelete, onRename, onConnect, onDisconnect, isConnected }) => {
+const formatDuration = (ms) => {
+  const seconds = Math.floor(ms / 1000);
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  
+  const pad = (n) => n.toString().padStart(2, '0');
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+};
+
+const ConnectionTimer = ({ startTime }) => {
+  const [duration, setDuration] = useState(Date.now() - startTime);
+
+  React.useEffect(() => {
+    const timer = setInterval(() => {
+      setDuration(Date.now() - startTime);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [startTime]);
+
+  return <span className="font-mono">{formatDuration(duration)}</span>;
+};
+
+const ServerListItem = ({ server, onSelect, onInfo, onDelete, onRename, onConnect, onDisconnect, isConnected, startTime }) => {
   const getStatusColor = () => {
     // Only show green if this specific server is connected
     if (isConnected) {
@@ -59,7 +82,11 @@ const ServerListItem = ({ server, onSelect, onInfo, onDelete, onRename, onConnec
           {truncateName(server.name, 10)}
         </span>
         {isConnected && (
-          <span className="text-xs text-green-400 font-semibold bg-green-500/20 px-2 py-0.5 rounded flex-shrink-0">Connected</span>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-green-400 font-semibold bg-green-500/20 px-2 py-0.5 rounded flex-shrink-0">
+              {startTime ? <ConnectionTimer startTime={startTime} /> : 'Connected'}
+            </span>
+          </div>
         )}
       </div>
       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
@@ -169,6 +196,7 @@ const ServerList = ({
   onConnectServer,
   onDisconnectServer,
   connectedServers,
+  serverConnectionDetails,
   isLoading,
   isProcessingFile
 }) => {
@@ -260,6 +288,7 @@ const ServerList = ({
                 onConnect={onConnectServer}
                 onDisconnect={onDisconnectServer}
                 isConnected={connectedServers ? connectedServers.has(server.id) : false}
+                startTime={serverConnectionDetails && serverConnectionDetails[server.id] ? serverConnectionDetails[server.id].startTime : null}
               />
             ))}
             </div>

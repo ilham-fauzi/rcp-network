@@ -479,9 +479,109 @@ function App() {
         onRename={handleRenameSubmit}
         onCancel={handleRenameCancel}
       />
+      
+      {/* Update Notification */}
+      <UpdateNotification />
     </>
   );
 }
+
+const UpdateNotification = () => {
+  const [status, setStatus] = useState(null); // 'available', 'downloading', 'downloaded', 'error'
+  const [progress, setProgress] = useState(0);
+  const [errorMsg, setErrorMsg] = useState('');
+
+  useEffect(() => {
+    if (!window.electronAPI) return;
+
+    window.electronAPI.onUpdateAvailable(() => {
+        setStatus('available');
+    });
+
+    window.electronAPI.onUpdateProgress((event, progressObj) => {
+        setStatus('downloading');
+        setProgress(Math.round(progressObj.percent));
+    });
+
+    window.electronAPI.onUpdateDownloaded(() => {
+        setStatus('downloaded');
+    });
+
+    window.electronAPI.onUpdateError((event, message) => {
+        // Only show if we were actually doing something
+        if (status) {
+            setStatus('error');
+            setErrorMsg(message);
+            // Auto hide error after 5s
+            setTimeout(() => setStatus(null), 5000);
+        }
+    });
+    
+    return () => {
+         window.electronAPI.removeAllListeners('update-available');
+         window.electronAPI.removeAllListeners('update-progress');
+         window.electronAPI.removeAllListeners('update-downloaded');
+         window.electronAPI.removeAllListeners('update-error');
+    }
+  }, [status]); // Add status dependency to handle error logic correctly if needed, though mostly independent
+
+  if (!status) return null;
+
+  return (
+    <div className="fixed bottom-4 right-4 z-50 p-4 rounded-lg shadow-lg bg-gray-800 text-white border border-gray-700 w-80 animate-fade-in-up">
+        <div className="flex items-start gap-3">
+             <div className="mt-1">
+                 {status === 'available' && (
+                     <svg className="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                 )}
+                 {status === 'downloading' && (
+                     <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
+                 )}
+                 {status === 'downloaded' && (
+                     <svg className="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                 )}
+                 {status === 'error' && (
+                     <svg className="w-5 h-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                 )}
+             </div>
+             <div className="flex-1">
+                 {status === 'available' && (
+                     <div>
+                         <h4 className="font-semibold text-sm">Update Available</h4>
+                         <p className="text-xs text-gray-400 mt-1">Starting download...</p>
+                     </div>
+                 )}
+                 {status === 'downloading' && (
+                     <div>
+                         <h4 className="font-semibold text-sm">Downloading Update...</h4>
+                         <div className="w-full bg-gray-700 rounded-full h-1.5 mt-2">
+                             <div className="bg-primary h-1.5 rounded-full transition-all duration-300" style={{ width: `${progress}%` }}></div>
+                         </div>
+                         <p className="text-xs text-right text-gray-400 mt-1">{progress}%</p>
+                     </div>
+                 )}
+                 {status === 'downloaded' && (
+                     <div>
+                         <h4 className="font-semibold text-sm">Update Ready</h4>
+                         <p className="text-xs text-gray-400 mt-1">Restart to install update.</p>
+                     </div>
+                 )}
+                 {status === 'error' && (
+                     <div>
+                         <h4 className="font-semibold text-sm">Update Failed</h4>
+                         <p className="text-xs text-red-300 mt-1">{errorMsg}</p>
+                     </div>
+                 )}
+             </div>
+             {status === 'downloaded' && (
+                 <button onClick={() => window.close()} className="p-1 hover:bg-gray-700 rounded text-gray-400 hover:text-white transition-colors">
+                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                 </button>
+             )}
+        </div>
+    </div>
+  );
+};
 
 export default App;
 

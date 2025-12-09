@@ -24,6 +24,8 @@
     "postinstall": "electron-builder install-app-deps && electron-rebuild -f -w keytar"
   },
   "dependencies": {
+    "electron-log": "^5.4.3",
+    "electron-updater": "^6.6.2",
     "keytar": "^7.9.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
@@ -143,7 +145,13 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "ilham-fauzi",
+        "repo": "rcp-network"
+      }
+    ]
   }
 }
-

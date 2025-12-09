@@ -52,6 +52,7 @@ function App() {
   const [showSudoDialog, setShowSudoDialog] = useState(false);
   const [sudoPasswordValidated, setSudoPasswordValidated] = useState(false);
   const [connectedServers, setConnectedServers] = useState(new Set()); // Track connected server IDs
+  const [serverConnectionDetails, setServerConnectionDetails] = useState({}); // Track details like startTime
   const [showRenameDialog, setShowRenameDialog] = useState(false);
   const [serverToRename, setServerToRename] = useState(null);
   const [triggerConnect, setTriggerConnect] = useState(null); // Trigger connection from list
@@ -63,41 +64,69 @@ function App() {
     setServers(loadedServers);
     setIsInitialLoad(false);
 
-    // Check VPN directory and sudo password status
-    const checkDirectoryAndPassword = async () => {
-      if (!window.electronAPI) {
-        // Not in Electron, skip
-        return;
-      }
+    // Setup Electron listeners and checks
+    const setupElectron = async () => {
+      if (!window.electronAPI) return;
 
+      // 1. Check Directory/Password
       try {
-        // Check if VPN directory exists
         const dirStatus = await window.electronAPI.checkVpnDirectory();
-        
-        // Check if sudo password is available and valid from keychain
         const passwordValid = await window.electronAPI.checkSudoPassword();
-        
-        // Show dialog if:
-        // 1. Directory doesn't exist (needs sudo to create)
-        // 2. Password not valid or not available
         if (!dirStatus.exists || !passwordValid) {
           setShowSudoDialog(true);
         } else {
           setSudoPasswordValidated(true);
         }
       } catch (error) {
-        console.error('Error checking directory:', error);
-        // On error, show dialog to be safe
         setShowSudoDialog(true);
       }
+
+      // 2. Sync Active Connections
+      try {
+        const active = await window.electronAPI.getActiveConnections();
+        if (active) {
+            const newConnected = new Set();
+            const newDetails = {};
+            Object.entries(active).forEach(([id, info]) => {
+                newConnected.add(Number(id)); // Assuming ID is number
+                newDetails[Number(id)] = info;
+            });
+            // Also handle string IDs if used
+            Object.entries(active).forEach(([id, info]) => {
+                 if (isNaN(id)) {
+                    newConnected.add(id);
+                    newDetails[id] = info;
+                 }
+            });
+            
+            setConnectedServers(newConnected);
+            setServerConnectionDetails(newDetails);
+        }
+      } catch (error) {
+        console.error('Failed to sync connections:', error);
+      }
+
+      // 3. Listen for disconnection events
+      window.electronAPI.onVpnDisconnected((event, { serverId, reason }) => {
+         console.log(`Server ${serverId} disconnected: ${reason}`);
+         setConnectedServers(prev => {
+             const newSet = new Set(prev);
+             newSet.delete(serverId);
+             return newSet;
+         });
+         setServerConnectionDetails(prev => {
+             const newDetails = { ...prev };
+             delete newDetails[serverId];
+             return newDetails;
+         });
+      });
     };
 
-    checkDirectoryAndPassword();
+    setupElectron();
     
     // Check OpenVPN installation
     const checkOpenVpn = async () => {
       if (!window.electronAPI) {
-        // Not in Electron, skip
         setOpenvpnStatus({ installed: true, checking: false, platform: null, installationGuide: null });
         return;
       }
@@ -123,6 +152,12 @@ function App() {
     };
 
     checkOpenVpn();
+    
+    return () => {
+       if (window.electronAPI) {
+         window.electronAPI.removeAllListeners('vpn-disconnected');
+       }
+    };
   }, []);
 
   // Save servers to storage whenever servers change (but not on initial load)
@@ -313,6 +348,11 @@ function App() {
           newSet.delete(server.id);
           return newSet;
         });
+        setServerConnectionDetails(prev => {
+             const newDetails = { ...prev };
+             delete newDetails[server.id];
+             return newDetails;
+        });
       } else {
         alert(`Failed to disconnect: ${result.error || 'Unknown error'}`);
       }
@@ -380,6 +420,7 @@ function App() {
           onConnectServer={handleConnectServer}
           onDisconnectServer={handleDisconnectServer}
           connectedServers={connectedServers}
+          serverConnectionDetails={serverConnectionDetails}
           isLoading={isLoading}
           isProcessingFile={isProcessingFile}
         />
@@ -392,6 +433,7 @@ function App() {
             connectedServers={connectedServers}
             triggerConnect={triggerConnect}
             openvpnInstalled={openvpnStatus.installed}
+            connectionStartTime={selectedServer && serverConnectionDetails[selectedServer.id] ? serverConnectionDetails[selectedServer.id].startTime : null}
             onConnectionChange={(serverId, isConnected) => {
               setConnectedServers(prev => {
                 const newSet = new Set(prev);
@@ -402,6 +444,19 @@ function App() {
                 }
                 return newSet;
               });
+              
+              if (isConnected) {
+                  setServerConnectionDetails(prev => ({
+                      ...prev,
+                      [serverId]: { startTime: Date.now() }
+                  }));
+              } else {
+                  setServerConnectionDetails(prev => {
+                      const newDetails = { ...prev };
+                      delete newDetails[serverId];
+                      return newDetails;
+                  });
+              }
               
               // Note: We don't update server.status here because we use connectedServers Set
               // to determine connection status, which is more reliable for multiple connections

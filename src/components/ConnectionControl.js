@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import VpnAuthDialog from './VpnAuthDialog';
 import TrafficChart from './TrafficChart';
 
-const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChange, triggerConnect, openvpnInstalled = true }) => {
+const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChange, triggerConnect, openvpnInstalled = true, connectionStartTime }) => {
   const isConnected = selectedServer ? connectedServers.has(selectedServer.id) : false;
   const [isConnecting, setIsConnecting] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
@@ -255,6 +255,7 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
             downloadSpeed={downloadSpeed}
             uploadSpeed={uploadSpeed}
             onConnectClick={handleToggleConnection}
+            startTime={connectionStartTime}
           />
         </div>
 

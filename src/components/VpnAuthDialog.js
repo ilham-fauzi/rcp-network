@@ -202,5 +202,5 @@ const VpnAuthDialog = ({
   );
 };
 
-export default VpnAuthDialog;
+export default React.memo(VpnAuthDialog);
 

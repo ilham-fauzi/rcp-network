@@ -58,15 +58,30 @@ function App() {
   const [triggerConnect, setTriggerConnect] = useState(null); // Trigger connection from list
   const [openvpnStatus, setOpenvpnStatus] = useState({ installed: true, checking: true, platform: null, installationGuide: null });
 
-  // Load servers from storage on mount
+  // Load servers from filesystem on mount (and setup listeners)
   useEffect(() => {
-    const loadedServers = loadServers();
-    setServers(loadedServers);
-    setIsInitialLoad(false);
+    // Note: We don't load from localStorage anymore for the list itself, 
+    // but maybe we could store user preferences (like custom names) if we wanted.
+    // For now, file system is source of truth.
 
     // Setup Electron listeners and checks
     const setupElectron = async () => {
       if (!window.electronAPI) return;
+
+      // 0. Load Configs from Disk
+      try {
+          const configs = await window.electronAPI.getAllConfigs();
+          // Transform if needed, but the object structure from main { id, name, filePath } matches what we need
+          const formattedConfigs = configs.map(c => ({
+              ...c, 
+              status: 'disconnected', // Default, will update below
+              createdAt: new Date().toISOString() // Placeholder
+          }));
+          setServers(formattedConfigs);
+          setIsInitialLoad(false);
+      } catch (err) {
+          console.error("Failed to load configs:", err);
+      }
 
       // 1. Check Directory/Password
       try {
@@ -120,6 +135,31 @@ function App() {
              return newDetails;
          });
       });
+
+      // 4. Listen for connection events (e.g. from Tray)
+      if (window.electronAPI.onVpnConnected) {
+          window.electronAPI.onVpnConnected((event, { serverId, startTime }) => {
+             console.log(`Server ${serverId} connected`);
+             setConnectedServers(prev => {
+                 const newSet = new Set(prev);
+                 newSet.add(serverId);
+                 // Also ensure it is added for numbers/strings match
+                 if (!isNaN(serverId)) newSet.add(Number(serverId));
+                 return newSet;
+             });
+             setServerConnectionDetails(prev => ({
+                 ...prev,
+                 [serverId]: { startTime: startTime }
+             }));
+             // Also update for number/string match
+             if (!isNaN(serverId)) {
+                 setServerConnectionDetails(prev => ({
+                     ...prev,
+                     [Number(serverId)]: { startTime: startTime }
+                 }));
+             }
+          });
+      }
     };
 
     setupElectron();
@@ -156,16 +196,16 @@ function App() {
     return () => {
        if (window.electronAPI) {
          window.electronAPI.removeAllListeners('vpn-disconnected');
+         if (window.electronAPI.onVpnConnected) {
+             window.electronAPI.removeAllListeners('vpn-connected');
+         }
        }
     };
   }, []);
 
-  // Save servers to storage whenever servers change (but not on initial load)
-  useEffect(() => {
-    if (!isInitialLoad) {
-      saveServers(servers);
-    }
-  }, [servers, isInitialLoad]);
+  // Remove localStorage sync for servers list as we rely on file system now
+  // keeping the useEffect hook structure if checking other things, or just delete it.
+  // actually, let's delete the localStorage logic to avoid confusion.
 
   const handleServerSelect = (server) => {
     setSelectedServer(server);
@@ -200,16 +240,16 @@ function App() {
       }
 
       // File has been processed, automatically add to server list
-      const newServer = {
-        id: Date.now() + Math.random(), // Generate unique ID
-        name: result.fileName,
-        filePath: result.filePath,
-        status: 'disconnected',
-        createdAt: new Date().toISOString(),
-      };
-
-      // Add server to list
-      setServers((prevServers) => [newServer, ...prevServers]);
+      // File has been processed
+      
+      // Refresh list from backend to ensure we have the correct file ID/path
+      const configs = await window.electronAPI.getAllConfigs();
+      const formattedConfigs = configs.map(c => ({
+          ...c, 
+          status: 'disconnected', 
+          createdAt: new Date().toISOString()
+      }));
+      setServers(formattedConfigs);
 
       // Show success message if file was modified
       if (result.processed) {
@@ -235,8 +275,14 @@ function App() {
       const result = await window.electronAPI.deleteVpnFile(server.filePath);
       
       if (result.success) {
-        // Remove server from list
-        setServers((prevServers) => prevServers.filter(s => s.id !== server.id));
+        // Refresh list
+        const configs = await window.electronAPI.getAllConfigs();
+        const formattedConfigs = configs.map(c => ({
+            ...c, 
+            status: 'disconnected', 
+            createdAt: new Date().toISOString()
+        }));
+        setServers(formattedConfigs);
         
         // If deleted server was selected, clear selection
         if (selectedServer && selectedServer.id === server.id) {
@@ -284,21 +330,28 @@ function App() {
       
       if (result.success) {
         // Update server name in list
-        setServers((prevServers) =>
-          prevServers.map((s) =>
-            s.id === serverToRename.id
-              ? { ...s, name: newName, filePath: result.newFilePath }
-              : s
-          )
-        );
+        // Refresh list
+        const configs = await window.electronAPI.getAllConfigs();
+        const formattedConfigs = configs.map(c => ({
+            ...c, 
+            status: 'disconnected', 
+            createdAt: new Date().toISOString()
+        }));
+        setServers(formattedConfigs);
         
-        // Update selected server if it's the renamed one
+        // Update selected server if it's the renamed one. 
+        // Note: ID (filename) might have changed if name changed filename!
+        // The backend `renameVpnFile` basically renames the file.
+        // So the old ID is gone.
+        // We find the new server by the new filename (which is derived from name)
+        // But `result.newName` gives us the sanitized name.
+        // New ID should be `${result.newName}.ovpn`
+        
+        const newId = `${result.newName}.ovpn`;
+        const newServerObj = formattedConfigs.find(s => s.id === newId);
+
         if (selectedServer && selectedServer.id === serverToRename.id) {
-          setSelectedServer({
-            ...selectedServer,
-            name: newName,
-            filePath: result.newFilePath
-          });
+          setSelectedServer(newServerObj || null);
         }
 
         setShowRenameDialog(false);

@@ -42,6 +42,11 @@ const TrafficChart = ({ isConnected, downloadSpeed, uploadSpeed, onConnectClick,
 
   useEffect(() => {
     if (isConnected) {
+      // Initialize with start data immediately so chart renders instantly
+      if (timeRef.current === 0) {
+          setData([{ time: 0, download: 0, upload: 0, timeLabel: '0s' }]);
+      }
+
       // Start collecting data
       intervalRef.current = setInterval(() => {
         timeRef.current += 1;
@@ -78,7 +83,7 @@ const TrafficChart = ({ isConnected, downloadSpeed, uploadSpeed, onConnectClick,
 
   // Format time label for X-axis
   const formatTimeLabel = (value) => {
-    if (value <= 6) {
+    if (value === 0 || value <= 6) {
       return `${value}s`;
     } else if (value % 10 === 0 || value === 60 || value === 90) {
       return `${value}s`;
@@ -142,7 +147,7 @@ const TrafficChart = ({ isConnected, downloadSpeed, uploadSpeed, onConnectClick,
         className="relative" 
         style={{ height: `${chartHeight}px`, width: '100%' }}
       >
-        {isConnected && data.length > 0 ? (
+        {isConnected ? (
           <>
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart

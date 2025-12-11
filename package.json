@@ -1,6 +1,6 @@
 {
   "name": "rcp-network",
-  "version": "1.0.0",
+  "version": "v1.0.1",
   "description": "RCP Network Desktop Application",
   "author": {
     "name": "Ilham Fauzi",
@@ -21,6 +21,7 @@
     "build:win": "npm run build && electron-builder --win",
     "build:linux": "npm run build && electron-builder --linux",
     "build:all": "npm run build && electron-builder --mac --win --linux",
+    "release": "npm run build && electron-builder --mac --win --publish always",
     "postinstall": "electron-builder install-app-deps && electron-rebuild -f -w keytar"
   },
   "dependencies": {

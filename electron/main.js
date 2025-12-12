@@ -21,6 +21,11 @@ const keytar = require("keytar");
 const si = require('systeminformation');
 const isDev = process.env.ELECTRON_IS_DEV === "1";
 
+// Platform detection helpers
+const isWindows = () => process.platform === "win32";
+const isLinux = () => process.platform === "linux";
+const isMacOS = () => process.platform === "darwin";
+
 // Configure autoUpdater
 autoUpdater.channel = "latest";
 autoUpdater.autoDownload = true;
@@ -164,26 +169,34 @@ console.warn = (...args) => {
 // Get icon path based on platform
 function getIconPath() {
   const platform = process.platform;
+  // Now that icons are bundled in app.asar, we can simply use relative paths
+  const iconDir = path.join(__dirname, "../icons");
+
   if (platform === "darwin") {
     // macOS
-    return path.join(__dirname, "../icons/mac/icon.icns");
+    return path.join(iconDir, "mac/icon.icns");
   } else if (platform === "win32") {
     // Windows
-    return path.join(__dirname, "../icons/win/icon.ico");
+    return path.join(iconDir, "win/icon.ico");
   } else {
     // Linux
-    return path.join(__dirname, "../icons/png/512x512.png");
+    return path.join(iconDir, "png/512x512.png");
   }
 }
 
 function getTrayIconPath() {
   const platform = process.platform;
+  const iconDir = path.join(__dirname, "../icons");
+
   if (platform === "darwin") {
-    return path.join(__dirname, "../icons/png/16x16.png"); // Use 16x16 for Mac Tray for now
+    // macOS: Use 24x24 from tray folder
+    return path.join(iconDir, "tray/24x24.png");
   } else if (platform === "win32") {
-    return path.join(__dirname, "../icons/win/icon.ico");
+    // Windows: Use 48x48 from tray folder
+    return path.join(iconDir, "tray/48x48.png");
   } else {
-    return path.join(__dirname, "../icons/png/32x32.png");
+    // Linux: Use 48x48 from tray folder
+    return path.join(iconDir, "tray/48x48.png");
   }
 }
 
@@ -445,6 +458,7 @@ app.whenReady().then(async () => {
     }
   });
 
+
   // Watch for file changes in VPN directory to update Tray
   if (fs.existsSync(VPN_DIRECTORY)) {
     fs.watch(VPN_DIRECTORY, (eventType, filename) => {
@@ -455,14 +469,29 @@ app.whenReady().then(async () => {
   }
 });
 
+
 // Create System Tray
 function createTray() {
   const iconPath = getTrayIconPath();
-  const icon = nativeImage.createFromPath(iconPath);
+  logToFile("INFO", "Creating Tray with icon:", iconPath);
 
-  // Resize for macOS if needed (usually 22x22 max)
+  try {
+    if (fs.existsSync(iconPath)) {
+      logToFile("INFO", "Icon file exists at path");
+    } else {
+      logToFile("ERROR", "Icon file MISSING at path:", iconPath);
+    }
+  } catch (e) {
+    logToFile("ERROR", "Error checking icon existence:", e);
+  }
+
+  let icon = nativeImage.createFromPath(iconPath);
+  logToFile("INFO", "Icon empty status:", icon.isEmpty());
+
+
+  // Resize for macOS to appear sleek (Notion-like size is ~18-20px)
   if (isMacOS()) {
-    icon.resize({ width: 16, height: 16 });
+    icon = icon.resize({ width: 17, height: 17, quality: "best" });
     icon.setTemplateImage(true);
   }
 
@@ -817,9 +846,7 @@ app.on("web-contents-created", (event, contents) => {
 let validatedSudoPassword = null;
 
 // Platform detection helpers
-const isWindows = () => process.platform === "win32";
-const isLinux = () => process.platform === "linux";
-const isMacOS = () => process.platform === "darwin";
+
 const getPlatformName = () => {
   if (isWindows()) return "Windows";
   if (isLinux()) return "Linux";
@@ -1794,11 +1821,9 @@ const connectVpn = async (data) => {
                       
                       const timeString = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
                       
-                      // Update Tray Title (MacOS)
                       if (isMacOS()) {
                           tray.setTitle(timeString);
                       } else {
-                          // Windows/Linux: Set Tooltip
                           tray.setToolTip(`RCP Network: ${timeString}`);
                       }
                       
@@ -1812,6 +1837,7 @@ const connectVpn = async (data) => {
                     // Clear tickers
                     if (durationIntervals.has(serverId)) {
                         clearInterval(durationIntervals.get(serverId));
+                        durationIntervals.delete(serverId);
                         durationIntervals.delete(serverId);
                         if (tray && durationIntervals.size === 0) tray.setTitle('');
                     }
@@ -1963,6 +1989,7 @@ const connectVpn = async (data) => {
                   const ticker = setInterval(() => {
                       const diff = Date.now() - startTime;
                       const timeString = new Date(diff).toISOString().substr(11, 8);
+                      
                       if (isMacOS()) {
                           tray.setTitle(timeString);
                       } else {
@@ -2088,6 +2115,7 @@ const connectVpn = async (data) => {
               const ticker = setInterval(() => {
                   const diff = Date.now() - startTime;
                   const timeString = new Date(diff).toISOString().substr(11, 8);
+                  
                   if (isMacOS()) {
                       tray.setTitle(timeString);
                   } else {

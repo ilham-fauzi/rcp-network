@@ -70,20 +70,13 @@
       "build/**/*",
       "electron/**/*",
       "node_modules/**/*",
-      "package.json"
+      "package.json",
+      "icons/**/*"
     ],
     "asarUnpack": [
       "node_modules/keytar/**/*"
     ],
-    "extraFiles": [
-      {
-        "from": "icons",
-        "to": "icons",
-        "filter": [
-          "**/*"
-        ]
-      }
-    ],
+    "extraFiles": [],
     "mac": {
       "category": "public.app-category.networking",
       "target": [

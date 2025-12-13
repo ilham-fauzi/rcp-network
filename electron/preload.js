@@ -24,5 +24,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onUpdateDownloaded: (callback) => ipcRenderer.on('update-downloaded', callback),
   onUpdateError: (callback) => ipcRenderer.on('update-error', callback),
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  enableAwakeMode: (duration) => ipcRenderer.invoke('enable-awake-mode', duration),
+  disableAwakeMode: () => ipcRenderer.invoke('disable-awake-mode'),
+  onAwakeStatusChange: (callback) => ipcRenderer.on('awake-status-change', callback),
 });
 

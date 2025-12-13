@@ -77,7 +77,7 @@ A modern RCP Network desktop application built with Electron, React, and Tailwin
 
 - Node.js (v20-24 recommended)
 - npm or yarn
-- **OpenVPN**: Must be installed on your system
+- **OpenVPN Community Edition**: Must be installed on your system
   - **Windows**: Download from [OpenVPN Community Downloads](https://openvpn.net/community-downloads/)
   - **Linux**: Install via package manager (e.g., `sudo apt install openvpn` or `sudo yum install openvpn`)
   - **macOS**: Install via Homebrew (`brew install openvpn`) or download from [OpenVPN Community Downloads](https://openvpn.net/community-downloads/)
@@ -164,7 +164,7 @@ rcp_network/
 │   │   ├── ConnectionControl.js # Main content component (connection UI, stats)
 │   │   ├── TrafficChart.js      # Time-series traffic visualization
 │   │   ├── VpnAuthDialog.js     # VPN authentication dialog
-│   │   ├── SudoPasswordDialog.js # System password input dialog (initial setup)
+│   │   ├── SudoPasswordDialog.js # System authorization dialog (initial setup)
 │   │   ├── RenameDialog.js      # Server rename dialog
 │   │   └── OpenVpnWarning.js    # OpenVPN installation warning banner
 │   ├── App.js           # Main app component (state management, routing)
@@ -209,14 +209,14 @@ rcp_network/
 ### VpnAuthDialog.js
 
 - Email and password input fields
-- "Simpan" checkbox for email (appends to `.ovpn` file)
-- "Simpan Password" checkbox (saves to localStorage)
+- "Save" checkbox for email (appends to `.ovpn` file)
+- "Save Password" checkbox (saves to localStorage)
 - Auto-fill from saved credentials
 - Form validation
 
 ### SudoPasswordDialog.js
 
-- System password input (for initial setup)
+- System authorization input (for initial setup)
 - Password validation
 - Keychain integration
 - Directory creation on first run

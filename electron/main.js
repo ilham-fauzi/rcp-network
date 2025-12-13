@@ -1610,6 +1610,59 @@ const removeEmailFromOvpn = (filePath) => {
   }
 };
 
+// Helper: Flush DNS Cache
+const flushDns = async () => {
+  logToFile("INFO", "Flushing DNS cache...");
+  try {
+    if (isWindows()) {
+        // On Windows, ipconfig /flushdns usually requires Admin. 
+        // If the app is not running as admin, this might fail or do nothing for the system cache.
+        // However, we attempt it. If we are already admin, it works.
+        await execAsync('ipconfig /flushdns');
+        logToFile("INFO", "DNS cache flushed (Windows).");
+    } else if (isMacOS()) {
+        if (validatedSudoPassword) {
+            const escapedPassword = validatedSudoPassword
+              .replace(/'/g, "'\\''")
+              .replace(/\$/g, "\\$")
+              .replace(/`/g, "\\`");
+            // macOS: dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+            // Use sh -c to run both in one sudo session
+            const cmd = `echo '${escapedPassword}' | sudo -S sh -c 'dscacheutil -flushcache; killall -HUP mDNSResponder'`;
+            await execAsync(cmd);
+            logToFile("INFO", "DNS cache flushed (macOS).");
+        } else {
+             logToFile("WARN", "Skipping DNS flush: No sudo password available.");
+        }
+    } else {
+        // Linux: resolvectl is common for systemd-resolved
+        if (validatedSudoPassword) {
+            const escapedPassword = validatedSudoPassword
+              .replace(/'/g, "'\\''")
+              .replace(/\$/g, "\\$")
+              .replace(/`/g, "\\`");
+             const cmd = `echo '${escapedPassword}' | sudo -S resolvectl flush-caches`; 
+             try {
+                await execAsync(cmd);
+                logToFile("INFO", "DNS cache flushed (Linux - resolvectl).");
+             } catch (e) {
+                 // Fallback or ignore if resolvectl not present
+                 logToFile("WARN", "Failed to flush DNS with resolvectl, trying systemd-resolve...");
+                 try {
+                     const cmd2 = `echo '${escapedPassword}' | sudo -S systemd-resolve --flush-caches`;
+                     await execAsync(cmd2);
+                     logToFile("INFO", "DNS cache flushed (Linux - systemd-resolve).");
+                 } catch(ex) {
+                     logToFile("ERROR", "Failed to flush DNS on Linux.");
+                 }
+             }
+        }
+    }
+  } catch (error) {
+    logToFile("ERROR", "Failed to flush DNS:", error.message);
+  }
+};
+
 const connectVpn = async (data) => {
   try {
     const { serverId, filePath, email, password, saveEmail } = data;
@@ -1763,7 +1816,7 @@ const connectVpn = async (data) => {
           const openvpnProcess = exec(
             command,
             execOptions,
-            (error, stdout, stderr) => {
+            async (error, stdout, stderr) => {
               if (serverId && openvpnProcesses.has(serverId)) {
                 openvpnProcesses.delete(serverId);
               }
@@ -1869,8 +1922,11 @@ const connectVpn = async (data) => {
                   });
                 }
          
+         
          startTrafficMonitor();
-         resolve({ success: true, message: 'VPN connection started (Admin Mode)', serverId: serverId });
+         flushDns().then(() => {
+            resolve({ success: true, message: 'VPN connection started (Admin Mode)', serverId: serverId });
+         });
         });
       } else {
         // NOT ADMIN: Must trigger UAC
@@ -2007,7 +2063,9 @@ const connectVpn = async (data) => {
               }
             }
             
+            
             startTrafficMonitor();
+            await flushDns();
             return { success: true, message: 'VPN connection started (Elevated)', serverId: serverId };
         } catch (error) {
           logToFile(
@@ -2063,7 +2121,7 @@ const connectVpn = async (data) => {
       const openvpnProcess = exec(
         command,
         execOptions,
-        (error, stdout, stderr) => {
+        async (error, stdout, stderr) => {
           if (error) {
             console.error("OpenVPN execution error:", error);
           }
@@ -2153,7 +2211,9 @@ const connectVpn = async (data) => {
             }
         }
         startTrafficMonitor();
-        resolve({ success: true, message: 'VPN connection started', serverId: serverId });
+        flushDns().then(() => {
+            resolve({ success: true, message: 'VPN connection started', serverId: serverId });
+        });
     });
   } catch (error) {
     console.error("Error connecting VPN:", error);

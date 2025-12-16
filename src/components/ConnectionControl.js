@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import VpnAuthDialog from './VpnAuthDialog';
 import TrafficChart from './TrafficChart';
 
@@ -19,6 +19,33 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
   const [downloadSpeed, setDownloadSpeed] = useState(0);
   const [uploadSpeed, setUploadSpeed] = useState(0);
   const [appVersion, setAppVersion] = useState('1.0.0');
+  
+  // Awake Mode State
+  const [awakeEnabled, setAwakeEnabled] = useState(false);
+  const [awakeMenuOpen, setAwakeMenuOpen] = useState(false);
+  const [awakeExpiry, setAwakeExpiry] = useState(null);
+  const [awakeDuration, setAwakeDuration] = useState(null);
+  const [timeLeft, setTimeLeft] = useState(null);
+  const awakeMenuRef = useRef(null);
+
+  // Close Awake Menu on click outside
+  useEffect(() => {
+    function handleClickOutside(event) {
+      if (awakeMenuRef.current && !awakeMenuRef.current.contains(event.target)) {
+        setAwakeMenuOpen(false);
+      }
+    }
+    
+    if (awakeMenuOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    } else {
+        document.removeEventListener("mousedown", handleClickOutside);
+    }
+    
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [awakeMenuOpen]);
 
   useEffect(() => {
      if (window.electronAPI) {
@@ -130,7 +157,77 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
              window.electronAPI.removeAllListeners('vpn-log');
          }
      };
+      return () => {
+          if (window.electronAPI) {
+              window.electronAPI.removeAllListeners('vpn-log');
+              window.electronAPI.removeAllListeners('awake-status-change');
+          }
+      };
   }, [selectedServer]); 
+
+  // Awake Mode Listener
+  useEffect(() => {
+    if (window.electronAPI && window.electronAPI.onAwakeStatusChange) {
+        window.electronAPI.onAwakeStatusChange((event, status) => {
+            setAwakeEnabled(status.enabled);
+            setAwakeExpiry(status.expiry || null);
+            setAwakeDuration(status.duration || null);
+        });
+    }
+  }, []);
+
+  // Timer for Awake Mode countdown
+  useEffect(() => {
+    // If we have an expiry, start calculating
+    if (!awakeEnabled || !awakeExpiry) {
+      if (timeLeft) setTimeLeft(null);
+      return;
+    }
+
+    const updateTimer = () => {
+      const now = Date.now();
+      const remaining = awakeExpiry - now;
+      
+      if (remaining <= 0) {
+        // Time is up, but let the backend send the status change event to disable it
+        // Just show 00:00 or nothing for now
+        setTimeLeft('0s');
+      } else {
+        // Format remaining time
+        const hours = Math.floor(remaining / (1000 * 60 * 60));
+        const minutes = Math.floor((remaining % (1000 * 60 * 60)) / (1000 * 60));
+        const seconds = Math.floor((remaining % (1000 * 60)) / 1000);
+        
+        let timeString = '';
+        if (hours > 0) {
+            timeString = `${hours}h ${minutes}m`;
+        } else if (minutes > 0) {
+            timeString = `${minutes}m ${seconds}s`;
+        } else {
+            timeString = `${seconds}s`;
+        }
+        setTimeLeft(timeString);
+      }
+    };
+
+    updateTimer(); // Initial call
+    const interval = setInterval(updateTimer, 1000);
+    
+    return () => clearInterval(interval);
+  }, [awakeEnabled, awakeExpiry]);
+
+  const handleAwakeChange = async (duration) => {
+      setAwakeMenuOpen(false);
+      try {
+          if (duration === 'off') {
+              await window.electronAPI.disableAwakeMode();
+          } else {
+              await window.electronAPI.enableAwakeMode(duration);
+          }
+      } catch (e) {
+          console.error("Failed to toggle awake mode:", e);
+      }
+  }; 
 
   // Simulation for Traffic and Meta stats (Latency only) - Restored "Like Before"
   useEffect(() => {
@@ -376,6 +473,69 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
         <div>
           <p>RCP Network Desktop</p>
         </div>
+
+        {/* Awake Mode Control */}
+        <div className="relative" ref={awakeMenuRef}>
+             <button 
+                onClick={() => setAwakeMenuOpen(!awakeMenuOpen)}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded transition-colors ${awakeEnabled ? 'bg-yellow-500/10 text-yellow-500' : 'hover:bg-gray-800 text-gray-500'}`}
+                title="Awake Mode (Prevent Sleep)"
+             >
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M18 8h1a4 4 0 0 1 0 8h-1"></path>
+                    <path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"></path>
+                    <line x1="6" y1="1" x2="6" y2="4"></line>
+                    <line x1="10" y1="1" x2="10" y2="4"></line>
+                    <line x1="14" y1="1" x2="14" y2="4"></line>
+                </svg>
+                <span>{awakeEnabled ? (awakeExpiry ? (timeLeft ? `Awake (${timeLeft})` : 'Awake (Timer)') : 'Awake On') : 'Awake Mode'}</span>
+             </button>
+
+             {awakeMenuOpen && (
+                  <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 w-64 bg-gray-800 border border-gray-700 rounded-lg shadow-xl overflow-hidden z-50">
+                      <div className="py-1 max-h-96 overflow-y-auto">
+                          <div className="px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wider bg-gray-800/50">
+                              Keep System Awake
+                          </div>
+                          <button onClick={() => handleAwakeChange(null)} className={`w-full text-left px-4 py-2 text-sm hover:bg-gray-700 flex items-center justify-between ${awakeEnabled && !awakeExpiry ? 'text-yellow-500' : 'text-gray-300'}`}>
+                              Indefinite
+                              {awakeEnabled && !awakeExpiry && <span className="text-yellow-500">✓</span>}
+                          </button>
+                          
+                          <div className="border-t border-gray-700 my-1"></div>
+                          <div className={`px-4 py-1 text-xs font-semibold ${awakeEnabled && awakeDuration && awakeDuration < 60 * 60 * 1000 ? 'text-emerald-500' : 'text-gray-500'}`}>Minutes</div>
+                          <div className="grid grid-cols-4 gap-1 px-2">
+                             {[5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map(m => {
+                                 const ms = m * 60 * 1000;
+                                 const isActive = awakeEnabled && awakeDuration === ms;
+                                 return (
+                                     <button key={m} onClick={() => handleAwakeChange(ms)} className={`text-center py-1 text-xs rounded transition-colors ${isActive ? 'bg-emerald-500/20 text-emerald-500 font-bold' : 'text-gray-300 hover:bg-gray-700'}`}>
+                                         {m}
+                                     </button>
+                                 );
+                             })}
+                          </div>
+
+                          <div className={`mt-2 px-4 py-1 text-xs font-semibold ${awakeEnabled && awakeDuration && awakeDuration >= 60 * 60 * 1000 ? 'text-emerald-500' : 'text-gray-500'}`}>Hours</div>
+                          <div className="grid grid-cols-4 gap-1 px-2">
+                             {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 24].map(h => {
+                                 const ms = h * 60 * 60 * 1000;
+                                 const isActive = awakeEnabled && awakeDuration === ms;
+                                 return (
+                                    <button key={h} onClick={() => handleAwakeChange(ms)} className={`text-center py-1 text-xs rounded transition-colors ${isActive ? 'bg-emerald-500/20 text-emerald-500 font-bold' : 'text-gray-300 hover:bg-gray-700'}`}>
+                                        {h}
+                                    </button>
+                                 );
+                             })}
+                          </div>
+
+                          <div className="border-t border-gray-700 my-1 mt-2"></div>
+                          <button onClick={() => handleAwakeChange('off')} className="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-gray-700">Disable</button>
+                      </div>
+                  </div>
+             )}
+        </div>
+
         <div>
           <p>Version {appVersion}</p>
         </div>

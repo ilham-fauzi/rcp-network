@@ -9,7 +9,9 @@ const {
   nativeImage,
   shell,
   Notification,
+  powerSaveBlocker,
 } = require("electron");
+const settings = require("electron-settings");
 const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const fs = require("fs");
@@ -625,14 +627,83 @@ function updateTrayMenu() {
 
   menuTemplate.push(
     { type: "separator" },
+    {
+      label: "Awake Mode",
+      submenu: [
+        {
+          label: "Indefinite",
+          type: "checkbox",
+          checked: awakeFooterId !== null && awakeDuration === null,
+          click: () => startAwakeMode(null),
+        },
+        { type: "separator" },
+        {
+          label: "Minutes",
+          submenu: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map((m) => {
+            const ms = m * 60 * 1000;
+            const isActive = awakeDuration === ms;
+            let label = `${m} Minutes`;
+            
+            if (isActive && awakeExpiry) {
+                const now = Date.now();
+                const remaining = Math.max(0, awakeExpiry - now);
+                const remainingMins = Math.ceil(remaining / 60000);
+                label += ` (${remainingMins}m left)`;
+            }
+
+            return {
+                label: label,
+                type: "checkbox",
+                checked: isActive,
+                click: () => startAwakeMode(ms),
+            };
+          }),
+        },
+        {
+          label: "Hours",
+          submenu: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 24].map((h) => {
+            const ms = h * 60 * 60 * 1000;
+            const isActive = awakeDuration === ms;
+            let label = `${h} Hours`;
+            
+            if (isActive && awakeExpiry) {
+                const now = Date.now();
+                const remaining = Math.max(0, awakeExpiry - now);
+                // Format: 1h 20m if > 1h, else 59m
+                if (remaining > 60 * 60 * 1000) {
+                     const hrs = Math.floor(remaining / (60 * 60 * 1000));
+                     const mins = Math.ceil((remaining % (60 * 60 * 1000)) / 60000);
+                     label += ` (${hrs}h ${mins}m left)`;
+                } else {
+                     const mins = Math.ceil(remaining / 60000);
+                     label += ` (${mins}m left)`;
+                }
+            }
+
+            return {
+                label: label,
+                type: "checkbox",
+                checked: isActive,
+                click: () => startAwakeMode(ms),
+            };
+          }),
+        },
+        { type: "separator" },
+        {
+          label: "Disable",
+          click: () => stopAwakeMode(),
+        },
+      ],
+    },
+    { type: "separator" },
     { label: "Refresh", click: updateTrayMenu },
     {
       label: "Open App",
       click: () => {
         if (mainWindow && !mainWindow.isDestroyed()) {
-             mainWindow.show();
+          mainWindow.show();
         } else {
-             createWindow(); // Recreate if destroyed
+          createWindow(); // Recreate if destroyed
         }
       },
     },
@@ -2590,3 +2661,151 @@ ipcMain.handle("rename-vpn-file", async (event, filePath, newName) => {
     return { success: false, error: error.message || "Failed to rename file" };
   }
 });
+
+// Awake Mode (Amphetamine-like) implementation
+let awakeFooterId = null;
+let awakeTimer = null;
+let awakeDuration = null; // Store the original duration
+let awakeExpiry = null; // Store the expiry timestamp
+let awakeTrayInterval = null; // Store interval for tray updates
+
+function stopAwakeMode() {
+    if (awakeFooterId !== null && powerSaveBlocker.isStarted(awakeFooterId)) {
+        powerSaveBlocker.stop(awakeFooterId);
+        awakeFooterId = null;
+    }
+    if (awakeTimer) {
+        clearTimeout(awakeTimer);
+        awakeTimer = null;
+    }
+    if (awakeTrayInterval) {
+        clearInterval(awakeTrayInterval);
+        awakeTrayInterval = null;
+    }
+    awakeDuration = null;
+    awakeExpiry = null;
+    
+    // settings.setSync('awakeMode', { enabled: false }); // Optional persistence
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('awake-status-change', { enabled: false });
+    }
+    updateTrayMenu();
+    updateTrayIcon();
+}
+
+function startAwakeMode(duration = null) {
+    // Stop previous if exists (but don't emit 'false' event yet to avoid flicker)
+    if (awakeFooterId !== null && powerSaveBlocker.isStarted(awakeFooterId)) {
+        powerSaveBlocker.stop(awakeFooterId);
+        awakeFooterId = null;
+    }
+    if (awakeTimer) {
+        clearTimeout(awakeTimer);
+        awakeTimer = null;
+    }
+
+    // Start blocker: prevent-display-sleep (highest level)
+    awakeFooterId = powerSaveBlocker.start('prevent-display-sleep');
+    awakeDuration = duration;
+    
+    // Duration handling
+    let expiry = null;
+    
+    // Clear any existing interval for tray updates
+    if (awakeTrayInterval) {
+        clearInterval(awakeTrayInterval);
+        awakeTrayInterval = null;
+    }
+
+    if (duration && duration > 0) {
+        expiry = Date.now() + duration;
+        awakeExpiry = expiry; // Global tracking
+        
+        awakeTimer = setTimeout(() => {
+            stopAwakeMode();
+            if (Notification.isSupported()) {
+                new Notification({
+                    title: "RCP Network",
+                    body: "Awake Mode session expired. System can now sleep.",
+                }).show();
+            }
+        }, duration);
+
+        // Update Tray Title or Menu Item periodically
+        awakeTrayInterval = setInterval(() => {
+            updateTrayMenu();
+        }, 60000); // Update every minute to keep menu fresh? 
+        // Or simpler: We just update menu when opened? No, Tray doesn't have on-open event easily.
+        // We will update the label in updateTrayMenu dynamically based on current time.
+        
+    } else {
+        awakeExpiry = null;
+    }
+
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('awake-status-change', { enabled: true, duration, expiry });
+    }
+    updateTrayMenu();
+    updateTrayIcon();
+    return { success: true };
+}
+
+ipcMain.handle('enable-awake-mode', (event, duration) => {
+    startAwakeMode(duration);
+    return { success: true };
+});
+
+ipcMain.handle('disable-awake-mode', () => {
+    stopAwakeMode();
+    return { success: true };
+});
+
+function updateTrayIcon() {
+    if (!tray) return;
+    
+    const isAwake = awakeFooterId !== null;
+    let iconPath;
+
+    // Determine base icon name
+    const platform = process.platform;
+    let iconName = "";
+    
+    if (platform === "darwin") {
+        iconName = "24x24"; // Start with base name
+    } else if (platform === "win32") {
+        iconName = "48x48";
+    } else {
+        iconName = "48x48";
+    }
+
+    if (isAwake) {
+        iconName += "-green"; 
+    }
+    
+    iconPath = path.join(__dirname, `../icons/tray/${iconName}.png`);
+    
+    // Fallback if green icon doesn't exist
+    if (isAwake && !fs.existsSync(iconPath)) {
+         console.log("Green icon not found, reverting to default");
+         iconPath = getTrayIconPath(); 
+    }
+
+    let icon = nativeImage.createFromPath(iconPath);
+    
+    if (isMacOS()) {
+        // Resize to tray standard (usually 22x22 or 18x18 is best for thin bars)
+        // Original code used 17x17 for sleek look. 
+        icon = icon.resize({ width: 17, height: 17, quality: "best" });
+        
+        // Don't setTemplateImage(true) for colored icon, otherwise macOS masks it to black/white
+        if (!isAwake) {
+            icon.setTemplateImage(true);
+        } else {
+            icon.setTemplateImage(false);
+        }
+    }
+    
+    tray.setImage(icon);
+}
+

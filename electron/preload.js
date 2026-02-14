@@ -27,5 +27,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   enableAwakeMode: (duration) => ipcRenderer.invoke('enable-awake-mode', duration),
   disableAwakeMode: () => ipcRenderer.invoke('disable-awake-mode'),
   onAwakeStatusChange: (callback) => ipcRenderer.on('awake-status-change', callback),
+  // VPN Credential Storage
+  saveVpnCredentials: (filename, credentials) => ipcRenderer.invoke('save-vpn-credentials', filename, credentials),
+  loadVpnCredentials: (filename) => ipcRenderer.invoke('load-vpn-credentials', filename),
+  deleteVpnCredentials: (filename) => ipcRenderer.invoke('delete-vpn-credentials', filename),
+  onInstallProgress: (callback) => {
+    const subscription = (event, progress) => callback(progress);
+    ipcRenderer.on('install-progress', subscription);
+    return () => ipcRenderer.removeListener('install-progress', subscription);
+  },
 });
-

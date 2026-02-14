@@ -465,6 +465,7 @@ function App() {
         <div className="w-1/4 min-w-[280px] max-w-[320px] border-r border-gray-800">
         <ServerList
           servers={servers}
+          selectedServer={selectedServer}
           onServerSelect={handleServerSelect}
           onAddProfile={handleAddProfile}
           onDeleteServer={handleDeleteServer}

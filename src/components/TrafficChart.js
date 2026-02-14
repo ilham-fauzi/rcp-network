@@ -149,7 +149,7 @@ const TrafficChart = ({ isConnected, downloadSpeed, uploadSpeed, onConnectClick,
       >
         {isConnected ? (
           <>
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
               <AreaChart
                 data={data}
                 margin={{ top: 10, right: 10, left: 30, bottom: 30 }}
@@ -242,7 +242,7 @@ const TrafficChart = ({ isConnected, downloadSpeed, uploadSpeed, onConnectClick,
         ) : (
           <div className="w-full h-full flex items-center justify-center relative">
             {/* Empty Chart Background */}
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
               <AreaChart
                 data={[]}
                 margin={{ top: 10, right: 10, left: 30, bottom: 30 }}

@@ -80,36 +80,32 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
 
 
 
-  // Load saved email and password for selected server
+  // Load saved email and password for selected server from keytar
   useEffect(() => {
-    if (selectedServer) {
-      const cacheKey = `vpn_auth_${selectedServer.id}`;
-      try {
-        const cached = localStorage.getItem(cacheKey);
-        if (cached) {
-          const authData = JSON.parse(cached);
-          if (authData.emailSaved) {
-            setSavedEmail(authData.email);
+    const loadCredentials = async () => {
+      if (selectedServer && window.electronAPI && window.electronAPI.loadVpnCredentials) {
+        try {
+          // Extract filename from filePath
+          const filename = selectedServer.filePath ? selectedServer.filePath.split('/').pop() : null;
+          if (filename) {
+            const creds = await window.electronAPI.loadVpnCredentials(filename);
+            setSavedEmail(creds.email || null);
+            setSavedPassword(creds.password || null);
           } else {
             setSavedEmail(null);
-          }
-          if (authData.passwordSaved && authData.password) {
-            setSavedPassword(authData.password);
-          } else {
             setSavedPassword(null);
           }
-        } else {
+        } catch (error) {
+          console.error('Error loading VPN credentials:', error);
           setSavedEmail(null);
           setSavedPassword(null);
         }
-      } catch (error) {
+      } else {
         setSavedEmail(null);
         setSavedPassword(null);
       }
-    } else {
-      setSavedEmail(null);
-      setSavedPassword(null);
-    }
+    };
+    loadCredentials();
   }, [selectedServer]);
 
   // Trigger connection when connect button clicked from list
@@ -311,24 +307,6 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
         throw new Error('Electron not available');
       }
 
-      // Save auth data to cache
-      const cacheKey = `vpn_auth_${selectedServer.id}`;
-      const authCache = {
-        email: authData.email,
-        emailSaved: authData.saveEmail
-      };
-      
-      // Only save password if checkbox is checked
-      if (authData.savePassword) {
-        authCache.password = authData.password;
-        authCache.passwordSaved = true;
-      } else {
-        // Don't save password if checkbox is not checked
-        authCache.passwordSaved = false;
-      }
-      
-      localStorage.setItem(cacheKey, JSON.stringify(authCache));
-
       // Connect VPN
       const result = await window.electronAPI.connectVpn({
         serverId: selectedServer.id,
@@ -340,17 +318,28 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
 
       if (result.success) {
         addLog('Connected');
-        
-        // Update saved email if checkbox was checked
-        if (authData.saveEmail) {
-          setSavedEmail(authData.email);
-        }
-        
-        // Update saved password if checkbox was checked
-        if (authData.savePassword) {
-          setSavedPassword(authData.password);
-        } else {
-          setSavedPassword(null);
+
+        // Handle credential persistence via keytar
+        const filename = selectedServer.filePath ? selectedServer.filePath.split('/').pop() : null;
+        if (filename && window.electronAPI.saveVpnCredentials) {
+          const credsToSave = {};
+          if (authData.saveEmail) {
+            credsToSave.email = authData.email;
+            setSavedEmail(authData.email);
+          } else {
+            // Delete saved email if unchecked
+            await window.electronAPI.deleteVpnCredentials(filename).catch(() => {});
+            setSavedEmail(null);
+          }
+          if (authData.savePassword) {
+            credsToSave.password = authData.password;
+            setSavedPassword(authData.password);
+          } else {
+            setSavedPassword(null);
+          }
+          if (Object.keys(credsToSave).length > 0) {
+            await window.electronAPI.saveVpnCredentials(filename, credsToSave);
+          }
         }
         
         // Update connected servers

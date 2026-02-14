@@ -23,7 +23,7 @@ const ConnectionTimer = ({ startTime }) => {
   return <span className="font-mono">{formatDuration(duration)}</span>;
 };
 
-const ServerListItem = ({ server, onSelect, onInfo, onDelete, onRename, onConnect, onDisconnect, isConnected, startTime }) => {
+const ServerListItem = ({ server, onSelect, onInfo, onDelete, onRename, onConnect, onDisconnect, isConnected, isSelected, startTime }) => {
   const getStatusColor = () => {
     // Only show green if this specific server is connected
     if (isConnected) {
@@ -72,13 +72,15 @@ const ServerListItem = ({ server, onSelect, onInfo, onDelete, onRename, onConnec
       className={`flex items-center justify-between p-3 rounded-lg cursor-pointer transition-colors group ${
         isConnected 
           ? 'bg-green-900/30 border border-green-500/50 hover:bg-green-900/40' 
-          : 'hover:bg-gray-800'
+          : isSelected
+            ? 'bg-blue-900/30 border border-blue-500/40 hover:bg-blue-900/40'
+            : 'border border-transparent hover:bg-gray-800'
       }`}
       onClick={() => onSelect(server)}
     >
       <div className="flex items-center gap-3 flex-1 min-w-0">
         <div className={`w-3 h-3 rounded-full flex-shrink-0 ${getStatusColor()} ${isConnected ? 'ring-2 ring-green-400 ring-offset-2 ring-offset-gray-900' : ''}`} />
-        <span className={`text-sm font-medium truncate ${isConnected ? 'text-green-100' : 'text-gray-100'}`} title={server.name}>
+        <span className={`text-sm font-medium truncate ${isConnected ? 'text-green-100' : isSelected ? 'text-blue-100' : 'text-gray-100'}`} title={server.name}>
           {truncateName(server.name, 10)}
         </span>
         {isConnected && (
@@ -89,7 +91,7 @@ const ServerListItem = ({ server, onSelect, onInfo, onDelete, onRename, onConnec
           </div>
         )}
       </div>
-      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+      <div className={`flex items-center gap-1 ${isSelected || isConnected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity flex-shrink-0`}>
         {isConnected ? (
           <button
             onClick={handleDisconnect}
@@ -188,6 +190,7 @@ const ServerListItem = ({ server, onSelect, onInfo, onDelete, onRename, onConnec
 
 const ServerList = ({ 
   servers, 
+  selectedServer,
   onServerSelect, 
   onAddProfile, 
   onDeleteServer,
@@ -288,6 +291,7 @@ const ServerList = ({
                 onConnect={onConnectServer}
                 onDisconnect={onDisconnectServer}
                 isConnected={connectedServers ? connectedServers.has(server.id) : false}
+                isSelected={selectedServer ? selectedServer.id === server.id : false}
                 startTime={serverConnectionDetails && serverConnectionDetails[server.id] ? serverConnectionDetails[server.id].startTime : null}
               />
             ))}

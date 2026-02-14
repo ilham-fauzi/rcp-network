@@ -81,57 +81,30 @@
     "mac": {
       "category": "public.app-category.networking",
       "target": [
-        {
-          "target": "dmg",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        },
-        {
-          "target": "zip",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        }
+        "dmg",
+        "pkg"
       ],
       "icon": "icons/mac/icon.icns",
       "hardenedRuntime": true,
       "gatekeeperAssess": false
     },
+    "pkg": {
+      "installLocation": "/Applications",
+      "scripts": "build/pkg-scripts",
+      "allowAnywhere": false,
+      "allowCurrentUserHome": false,
+      "allowRootDirectory": false,
+      "overwriteAction": "upgrade"
+    },
     "win": {
       "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64",
-            "ia32"
-          ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
-        }
+        "nsis"
       ],
       "icon": "icons/win/icon.ico"
     },
     "linux": {
       "target": [
-        {
-          "target": "AppImage",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "deb",
-          "arch": [
-            "x64"
-          ]
-        }
+        "AppImage"
       ],
       "category": "Network",
       "icon": "icons/png/512x512.png"

@@ -12,7 +12,6 @@ const {
   powerSaveBlocker,
 } = require("electron");
 const settings = require("electron-settings");
-const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -20,7 +19,7 @@ const { exec, spawn } = require("child_process");
 const util = require("util");
 const execAsync = util.promisify(exec);
 const keytar = require("keytar");
-const si = require('systeminformation');
+const si = require("systeminformation");
 const isDev = process.env.ELECTRON_IS_DEV === "1";
 
 // Platform detection helpers
@@ -28,9 +27,8 @@ const isWindows = () => process.platform === "win32";
 const isLinux = () => process.platform === "linux";
 const isMacOS = () => process.platform === "darwin";
 
-// Configure autoUpdater
-autoUpdater.channel = "latest";
-autoUpdater.autoDownload = true;
+// autoUpdater will be configured after app is ready
+let autoUpdater = null;
 
 // Global Traffic Monitor
 let trafficInterval = null;
@@ -39,80 +37,83 @@ let lastTx = 0;
 let lastCheckTime = 0;
 
 function startTrafficMonitor() {
-    if (trafficInterval) return;
-    
-    // Reset counters
-    lastRx = 0;
-    lastTx = 0;
-    lastCheckTime = Date.now();
+  if (trafficInterval) return;
 
-    trafficInterval = setInterval(async () => {
-        if (!mainWindow || mainWindow.isDestroyed()) return;
-        if (openvpnProcesses.size === 0) {
-            stopTrafficMonitor();
-            return;
+  // Reset counters
+  lastRx = 0;
+  lastTx = 0;
+  lastCheckTime = Date.now();
+
+  trafficInterval = setInterval(async () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (openvpnProcesses.size === 0) {
+      stopTrafficMonitor();
+      return;
+    }
+
+    try {
+      const stats = await si.networkStats();
+      const now = Date.now();
+      const timeDiff = (now - lastCheckTime) / 1000; // seconds
+
+      if (timeDiff <= 0) return;
+      if (timeDiff > 10) {
+        // If huge jump (e.g. sleep), reset
+        lastCheckTime = now;
+        lastRx = 0; // Will skip one frame effectively
+        lastTx = 0;
+        return;
+      }
+
+      // Sum all non-internal traffic
+      let currentRx = 0;
+      let currentTx = 0;
+
+      stats.forEach((s) => {
+        if (s.internal) return;
+        currentRx += s.rx_bytes;
+        currentTx += s.tx_bytes;
+      });
+
+      if (lastRx > 0 && lastTx > 0) {
+        const rxSpeed = Math.max(0, (currentRx - lastRx) / timeDiff); // bytes/sec
+        const txSpeed = Math.max(0, (currentTx - lastTx) / timeDiff);
+
+        // Only send if we have meaningful numbers (sometimes counters reset)
+        if (rxSpeed < 1e9 && txSpeed < 1e9) {
+          // Sanity check 1GB/s
+          mainWindow.webContents.send("vpn-traffic", {
+            download: rxSpeed,
+            upload: txSpeed,
+          });
         }
+      }
 
-        try {
-            const stats = await si.networkStats();
-            const now = Date.now();
-            const timeDiff = (now - lastCheckTime) / 1000; // seconds
-            
-            if (timeDiff <= 0) return;
-            if (timeDiff > 10) { // If huge jump (e.g. sleep), reset
-                lastCheckTime = now;
-                lastRx = 0; // Will skip one frame effectively
-                lastTx = 0;
-                return;
-            }
-
-            // Sum all non-internal traffic
-            let currentRx = 0;
-            let currentTx = 0;
-            
-            stats.forEach(s => {
-                if (s.internal) return; 
-                currentRx += s.rx_bytes;
-                currentTx += s.tx_bytes;
-            });
-            
-            if (lastRx > 0 && lastTx > 0) {
-                const rxSpeed = Math.max(0, (currentRx - lastRx) / timeDiff); // bytes/sec
-                const txSpeed = Math.max(0, (currentTx - lastTx) / timeDiff);
-                
-                // Only send if we have meaningful numbers (sometimes counters reset)
-                if (rxSpeed < 1e9 && txSpeed < 1e9) { // Sanity check 1GB/s
-                    mainWindow.webContents.send('vpn-traffic', {
-                        download: rxSpeed,
-                        upload: txSpeed
-                    });
-                }
-            }
-            
-            lastRx = currentRx;
-            lastTx = currentTx;
-            lastCheckTime = now;
-            
-        } catch (e) {
-            console.error("Traffic monitor error:", e);
-        }
-    }, 1000);
+      lastRx = currentRx;
+      lastTx = currentTx;
+      lastCheckTime = now;
+    } catch (e) {
+      console.error("Traffic monitor error:", e);
+    }
+  }, 1000);
 }
 
 function stopTrafficMonitor() {
-    if (trafficInterval) {
-        clearInterval(trafficInterval);
-        trafficInterval = null;
-    }
+  if (trafficInterval) {
+    clearInterval(trafficInterval);
+    trafficInterval = null;
+  }
 }
-autoUpdater.logger = require("electron-log");
-autoUpdater.logger.transports.file.level = "info";
+
+// autoUpdater logger will be configured in setupAutoUpdater
+
 
 // App configuration (must be defined before LOG_FILE)
 const APP_NAME = app.getName() || "rcp-network";
 const VPN_DIRECTORY = path.join(os.homedir(), `.${APP_NAME}`);
 const KEYCHAIN_SERVICE = `${APP_NAME}_sudo_password`;
 const KEYCHAIN_ACCOUNT = "sudo_password";
+const VPN_CRED_SERVICE = `${APP_NAME}_vpn_credentials`;
 
 // Setup logging to file (use VPN_DIRECTORY for logs)
 const LOG_FILE = path.join(VPN_DIRECTORY, "app.log");
@@ -208,6 +209,15 @@ let connectionTimers = new Map(); // Store timeouts for duration disconnects
 
 // Auto-update logic
 function setupAutoUpdater(win) {
+  // Require and configure autoUpdater here (after app is ready)
+  const { autoUpdater: updater } = require("electron-updater");
+  autoUpdater = updater;
+  
+  autoUpdater.logger = require("electron-log");
+  autoUpdater.logger.transports.file.level = "info";
+  autoUpdater.channel = "latest";
+  autoUpdater.autoDownload = true;
+  
   autoUpdater.on("checking-for-update", () => {
     autoUpdater.logger.info("Checking for updates...");
   });
@@ -429,7 +439,7 @@ function createWindow() {
 
     logToFile(
       "INFO",
-      "DevTools shortcuts registered: Cmd+Option+I or Cmd+Shift+I"
+      "DevTools shortcuts registered: Cmd+Option+I or Cmd+Shift+I",
     );
   }
 
@@ -460,7 +470,6 @@ app.whenReady().then(async () => {
     }
   });
 
-
   // Watch for file changes in VPN directory to update Tray
   if (fs.existsSync(VPN_DIRECTORY)) {
     fs.watch(VPN_DIRECTORY, (eventType, filename) => {
@@ -470,7 +479,6 @@ app.whenReady().then(async () => {
     });
   }
 });
-
 
 // Create System Tray
 function createTray() {
@@ -489,7 +497,6 @@ function createTray() {
 
   let icon = nativeImage.createFromPath(iconPath);
   logToFile("INFO", "Icon empty status:", icon.isEmpty());
-
 
   // Resize for macOS to appear sleek (Notion-like size is ~18-20px)
   if (isMacOS()) {
@@ -530,34 +537,39 @@ function updateTrayMenu() {
             label: file.replace(".ovpn", ""),
             icon: isConnected
               ? nativeImage.createFromPath(
-                  path.join(__dirname, "../icons/png/16x16.png")
+                  path.join(__dirname, "../icons/png/16x16.png"),
                 )
               : null, // Show icon if connected? Or just text.
             submenu: [
               {
                 label: isConnected ? "Disconnect" : "Connect",
-                       click: async () => {
-                             if (isConnected) {
-                                 // Disconnect
-                                 const result = await handleTrayDisconnect(serverId);
-                                 if (!result.success) { // handleTrayDisconnect returns boolean currently
-                                     // Actually handleTrayDisconnect implementation swallows the error but returns true/false?
-                                     // Let's check handleTrayDisconnect implementation.
-                                     // It calls disconnectVpn which returns {success...}
-                                     // But handleTrayDisconnect returns true/false placeholder?
-                                     // I will update handleTrayDisconnect to return the result object or throw.
-                                     // But simpler: just show error inside handleTrayDisconnect or here.
-                                     // The tool instruction says update methods.
-                                     // Ref: handleTrayDisconnect returns true currently.
-                                     dialog.showErrorBox("Disconnect Failed", result.message || "An unknown error occurred during disconnect.");
-                                 }
-                             } else {
-                                 const result = await handleTrayConnect(serverId, file);
-                             }
-                             updateTrayMenu();
-                         }
-                     },
-                     { type: 'separator' },
+                click: async () => {
+                  if (isConnected) {
+                    // Disconnect
+                    const result = await handleTrayDisconnect(serverId);
+                    if (!result.success) {
+                      // handleTrayDisconnect returns boolean currently
+                      // Actually handleTrayDisconnect implementation swallows the error but returns true/false?
+                      // Let's check handleTrayDisconnect implementation.
+                      // It calls disconnectVpn which returns {success...}
+                      // But handleTrayDisconnect returns true/false placeholder?
+                      // I will update handleTrayDisconnect to return the result object or throw.
+                      // But simpler: just show error inside handleTrayDisconnect or here.
+                      // The tool instruction says update methods.
+                      // Ref: handleTrayDisconnect returns true currently.
+                      dialog.showErrorBox(
+                        "Disconnect Failed",
+                        result.message ||
+                          "An unknown error occurred during disconnect.",
+                      );
+                    }
+                  } else {
+                    const result = await handleTrayConnect(serverId, file);
+                  }
+                  updateTrayMenu();
+                },
+              },
+              { type: "separator" },
               {
                 label: "Connect with Duration",
                 submenu: [
@@ -643,19 +655,19 @@ function updateTrayMenu() {
             const ms = m * 60 * 1000;
             const isActive = awakeDuration === ms;
             let label = `${m} Minutes`;
-            
+
             if (isActive && awakeExpiry) {
-                const now = Date.now();
-                const remaining = Math.max(0, awakeExpiry - now);
-                const remainingMins = Math.ceil(remaining / 60000);
-                label += ` (${remainingMins}m left)`;
+              const now = Date.now();
+              const remaining = Math.max(0, awakeExpiry - now);
+              const remainingMins = Math.ceil(remaining / 60000);
+              label += ` (${remainingMins}m left)`;
             }
 
             return {
-                label: label,
-                type: "checkbox",
-                checked: isActive,
-                click: () => startAwakeMode(ms),
+              label: label,
+              type: "checkbox",
+              checked: isActive,
+              click: () => startAwakeMode(ms),
             };
           }),
         },
@@ -665,26 +677,26 @@ function updateTrayMenu() {
             const ms = h * 60 * 60 * 1000;
             const isActive = awakeDuration === ms;
             let label = `${h} Hours`;
-            
+
             if (isActive && awakeExpiry) {
-                const now = Date.now();
-                const remaining = Math.max(0, awakeExpiry - now);
-                // Format: 1h 20m if > 1h, else 59m
-                if (remaining > 60 * 60 * 1000) {
-                     const hrs = Math.floor(remaining / (60 * 60 * 1000));
-                     const mins = Math.ceil((remaining % (60 * 60 * 1000)) / 60000);
-                     label += ` (${hrs}h ${mins}m left)`;
-                } else {
-                     const mins = Math.ceil(remaining / 60000);
-                     label += ` (${mins}m left)`;
-                }
+              const now = Date.now();
+              const remaining = Math.max(0, awakeExpiry - now);
+              // Format: 1h 20m if > 1h, else 59m
+              if (remaining > 60 * 60 * 1000) {
+                const hrs = Math.floor(remaining / (60 * 60 * 1000));
+                const mins = Math.ceil((remaining % (60 * 60 * 1000)) / 60000);
+                label += ` (${hrs}h ${mins}m left)`;
+              } else {
+                const mins = Math.ceil(remaining / 60000);
+                label += ` (${mins}m left)`;
+              }
             }
 
             return {
-                label: label,
-                type: "checkbox",
-                checked: isActive,
-                click: () => startAwakeMode(ms),
+              label: label,
+              type: "checkbox",
+              checked: isActive,
+              click: () => startAwakeMode(ms),
             };
           }),
         },
@@ -707,7 +719,7 @@ function updateTrayMenu() {
         }
       },
     },
-    { label: "Quit", click: () => app.quit() }
+    { label: "Quit", click: () => app.quit() },
   );
 
   const contextMenu = Menu.buildFromTemplate(menuTemplate);
@@ -721,35 +733,52 @@ let durationIntervals = new Map();
 async function handleTrayConnect(serverId, filename, duration = null) {
   // If already connected, do nothing (or show error)
   if (openvpnProcesses.has(serverId)) {
-      return false;
+    return false;
   }
 
-  // Check if we have saved credentials or if we should prompt
-  // For now, always prompt for maximizing user control as requested
-  createAuthWindow(serverId, filename, duration);
+  // Load saved credentials for this server
+  const savedCredentials = await loadVpnCredentials(filename);
+  createAuthWindow(serverId, filename, duration, savedCredentials);
   return true;
 }
 
-function createAuthWindow(serverId, filename, duration) {
-    const parentWindow = (mainWindow && !mainWindow.isDestroyed()) ? mainWindow : null;
-    const authWin = new BrowserWindow({
-        width: 400,
-        height: 500,
-        title: 'Connect to VPN',
-        minimizable: false,
-        maximizable: false,
-        resizable: false,
-        modal: true,
-        parent: parentWindow, 
-        webPreferences: {
-            nodeIntegration: true,
-            contextIsolation: false // For simple IPC without preload
-        }
-    });
+function createAuthWindow(serverId, filename, duration, savedCredentials = null) {
+  // Only parent to main window if it exists and is visible
+  const parentWindow =
+    mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()
+      ? mainWindow
+      : null;
 
-    authWin.setMenu(null); // Hide menu bar
+  const authWin = new BrowserWindow({
+    width: 400,
+    height: 540,
+    title: "Connect to VPN",
+    minimizable: false,
+    maximizable: false,
+    resizable: false,
+    modal: !!parentWindow,
+    parent: parentWindow || undefined,
+    alwaysOnTop: !parentWindow,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false, // For simple IPC without preload
+    },
+  });
 
-    const htmlContent = `
+  authWin.setMenu(null); // Hide menu bar
+
+  // macOS: ensure the app is visible and the window gets focus when standalone
+  if (process.platform === "darwin" && !parentWindow) {
+    app.dock.show();
+  }
+
+  // Pre-fill values from saved credentials
+  const prefillEmail = savedCredentials && savedCredentials.email ? savedCredentials.email : "";
+  const prefillPassword = savedCredentials && savedCredentials.password ? savedCredentials.password : "";
+  const checkSaveEmail = savedCredentials && savedCredentials.email ? "checked" : "";
+  const checkSavePassword = savedCredentials && savedCredentials.password ? "checked" : "";
+
+  const htmlContent = `
     <!DOCTYPE html>
     <html>
     <head>
@@ -765,6 +794,9 @@ function createAuthWindow(serverId, filename, duration) {
             .cancel { background: transparent; border: 1px solid #4b5563; color: #9ca3af; margin-top: 10px; }
             .cancel:hover { background: #374151; color: white; }
             .info { font-size: 12px; color: #6b7280; margin-top: 10px; text-align: center; }
+            .checkbox-group { display: flex; align-items: center; margin-bottom: 8px; }
+            .checkbox-group input[type="checkbox"] { width: auto; margin-right: 8px; }
+            .checkbox-group label { margin: 0; display: inline; }
         </style>
     </head>
     <body>
@@ -772,15 +804,19 @@ function createAuthWindow(serverId, filename, duration) {
         <form id="authForm">
             <div class="form-group">
                 <label>Username / Email</label>
-                <input type="text" id="email" required autofocus placeholder="Enter username">
+                <input type="text" id="email" required autofocus placeholder="Enter username" value="${prefillEmail}">
             </div>
             <div class="form-group">
                 <label>Password</label>
-                <input type="password" id="password" required placeholder="Enter password">
+                <input type="password" id="password" required placeholder="Enter password" value="${prefillPassword}">
             </div>
-            <div style="display: flex; align-items: center; margin-bottom: 15px;">
-                 <input type="checkbox" id="saveEmail" style="width: auto; margin-right: 8px;">
-                 <label for="saveEmail" style="margin:0; display:inline;">Save Username to Config</label>
+            <div class="checkbox-group">
+                 <input type="checkbox" id="saveEmail" ${checkSaveEmail}>
+                 <label for="saveEmail">Save Username</label>
+            </div>
+            <div class="checkbox-group">
+                 <input type="checkbox" id="savePassword" ${checkSavePassword}>
+                 <label for="savePassword">Save Password</label>
             </div>
             <button type="submit" id="connectBtn">Connect</button>
             <button type="button" class="cancel" onclick="window.close()">Cancel</button>
@@ -800,14 +836,16 @@ function createAuthWindow(serverId, filename, duration) {
                 const email = document.getElementById('email').value;
                 const password = document.getElementById('password').value;
                 const saveEmail = document.getElementById('saveEmail').checked;
+                const savePassword = document.getElementById('savePassword').checked;
                 
                 ipcRenderer.send('tray-auth-submit', { 
                     email, 
                     password, 
-                    saveEmail, 
+                    saveEmail,
+                    savePassword,
                     serverId: '${serverId}', 
                     filename: '${filename}',
-                    duration: ${duration ? duration : 'null'}
+                    duration: ${duration ? duration : "null"}
                 });
             };
             
@@ -824,56 +862,84 @@ function createAuthWindow(serverId, filename, duration) {
     </html>
     `;
 
-    authWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(htmlContent)}`);
-    
-    // Store reference securely if needed, but for now allow garbage collection on close
-    authWin.on('closed', () => {
-        // cleanup
-    });
+  authWin.loadURL(
+    `data:text/html;charset=utf-8,${encodeURIComponent(htmlContent)}`,
+  );
+
+  // Show and focus for standalone mode
+  authWin.once("ready-to-show", () => {
+    authWin.show();
+    authWin.focus();
+  });
+
+  // Store reference securely if needed, but for now allow garbage collection on close
+  authWin.on("closed", () => {
+    // cleanup
+  });
 }
 
 // Handle Form Submit from Auth Window
-ipcMain.on('tray-auth-submit', async (event, data) => {
-    const { email, password, saveEmail, serverId, filename, duration } = data;
-    const filePath = path.join(VPN_DIRECTORY, filename);
-    const senderWebContents = event.sender; // To reply back to the window
-    
-    // Call connectVpn
-    const result = await connectVpn({ 
-        serverId, 
-        filePath, 
-        email, 
-        password, 
-        saveEmail 
-    });
-    
-    if (result.success) {
-        // Close the auth window
-        const win = BrowserWindow.fromWebContents(senderWebContents);
-        if (win) win.close();
-        
-        // Handle duration
-        if (duration) {
-            const timer = setTimeout(async () => {
-                console.log(`Duration expired for ${serverId}. Disconnecting...`);
-                await handleTrayDisconnect(serverId);
-                if (Notification.isSupported()) {
-                    new Notification({
-                      title: "RCP Network",
-                      body: `Connection ${filename} ended (Duration expired)`,
-                    }).show();
-                  }
-            }, duration);
-            connectionTimers.set(serverId, timer);
-        }
-        
-        // Update Tray to show we are connected
-        updateTrayMenu();
-        
+ipcMain.on("tray-auth-submit", async (event, data) => {
+  const { email, password, saveEmail, savePassword, serverId, filename, duration } = data;
+  const filePath = path.join(VPN_DIRECTORY, filename);
+  const senderWebContents = event.sender; // To reply back to the window
+
+  // Call connectVpn
+  const result = await connectVpn({
+    serverId,
+    filePath,
+    email,
+    password,
+    saveEmail,
+  });
+
+  if (result.success) {
+    // Handle credential persistence via keytar
+    const credsToSave = {};
+    if (saveEmail) {
+      credsToSave.email = email;
     } else {
-        // Send error back to window
-        senderWebContents.send('connection-error', result.error || 'Connection failed');
+      // Delete saved email if unchecked
+      await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_email`).catch(() => {});
     }
+    if (savePassword) {
+      credsToSave.password = password;
+    } else {
+      // Delete saved password if unchecked
+      await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_password`).catch(() => {});
+    }
+    if (Object.keys(credsToSave).length > 0) {
+      await saveVpnCredentials(filename, credsToSave);
+    }
+
+    // Close the auth window
+    const win = BrowserWindow.fromWebContents(senderWebContents);
+    if (win) win.close();
+
+    // Handle duration
+    if (duration) {
+      const timer = setTimeout(async () => {
+        console.log(`Duration expired for ${serverId}. Disconnecting...`);
+        await handleTrayDisconnect(serverId);
+        if (Notification.isSupported()) {
+          new Notification({
+            title: "RCP Network",
+            body: `Connection ${filename} ended (Duration expired)`,
+          }).show();
+        }
+      }, duration);
+      connectionTimers.set(serverId, timer);
+    }
+
+    // Update Tray to show we are connected
+    updateTrayMenu();
+  } else {
+    // Send error back to window
+    senderWebContents.send(
+      "connection-error",
+      result.error || "Connection failed",
+    );
+  }
 });
 
 async function handleTrayDisconnect(serverId) {
@@ -937,6 +1003,178 @@ const getInstallationGuide = (platform) => {
   return "https://openvpn.net/community-downloads/";
 };
 
+// Install OpenVPN via Homebrew (macOS only)
+const installOpenVpnViaBrew = async (sudoPassword, mainWindow = null) => {
+  const sendProgress = (step, message) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('install-progress', { step, message });
+    }
+  };
+  try {
+    logToFile("INFO", "Starting OpenVPN installation via Homebrew...");
+    sendProgress(1, "Checking OpenVPN installation...");
+    
+    // Escape password for shell
+    const escapedPassword = sudoPassword
+      .replace(/'/g, "'\\''")
+      .replace(/\$/g, "\\$")
+      .replace(/`/g, "\\`");
+
+    // Step 1: Check if Homebrew is installed
+    let brewInstalled = false;
+    try {
+      const envPath = process.env.PATH || "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin";
+      await execAsync("which brew", {
+        timeout: 3000,
+        env: { ...process.env, PATH: envPath },
+      });
+      brewInstalled = true;
+      logToFile("INFO", "Homebrew is already installed");
+      sendProgress(2, "Homebrew found, preparing installation...");
+    } catch (error) {
+      logToFile("WARN", "Homebrew not found, will attempt to install it");
+      sendProgress(2, "Homebrew not found, will install it first...");
+    }
+
+    // Step 2: Install Homebrew if not present
+    if (!brewInstalled) {
+      // Show notification
+      if (Notification.isSupported()) {
+        new Notification({
+          title: "RCP Network",
+          body: "Installing Homebrew package manager...",
+        }).show();
+      }
+
+      logToFile("INFO", "Installing Homebrew...");
+      sendProgress(2, "Installing Homebrew package manager...");
+      
+      // Download and install Homebrew
+      // Using the official Homebrew installation script
+      const brewInstallCmd = `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`;
+      
+      try {
+        // Run Homebrew installation with sudo password
+        await execAsync(brewInstallCmd, {
+          timeout: 300000, // 5 minutes timeout
+          env: { 
+            ...process.env, 
+            NONINTERACTIVE: "1" // Non-interactive installation
+          },
+        });
+        
+        logToFile("INFO", "Homebrew installed successfully");
+        
+        // Update PATH to include Homebrew
+        const brewPath = process.arch === 'arm64' ? '/opt/homebrew/bin' : '/usr/local/bin';
+        process.env.PATH = `${brewPath}:${process.env.PATH}`;
+        
+      } catch (error) {
+        logToFile("ERROR", "Failed to install Homebrew:", error.message);
+        
+        if (Notification.isSupported()) {
+          new Notification({
+            title: "RCP Network",
+            body: "Failed to install Homebrew. Please install manually.",
+          }).show();
+        }
+        
+        return {
+          installed: false,
+          error: "Failed to install Homebrew. Please install it manually from https://brew.sh",
+        };
+      }
+    }
+
+    // Step 3: Install OpenVPN via Homebrew
+    if (Notification.isSupported()) {
+      new Notification({
+        title: "RCP Network",
+        body: "Installing OpenVPN in the background...",
+      }).show();
+    }
+
+    logToFile("INFO", "Installing OpenVPN via Homebrew...");
+    sendProgress(3, "Installing OpenVPN (this may take 2-5 minutes)...");
+    
+    const envPath = process.env.PATH || "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin";
+    
+    // Install OpenVPN using brew with sudo password
+    const installCmd = `echo '${escapedPassword}' | sudo -S brew install openvpn`;
+    
+    try {
+      const { stdout, stderr } = await execAsync(installCmd, {
+        timeout: 600000, // 10 minutes timeout for installation
+        env: { ...process.env, PATH: envPath },
+        maxBuffer: 1024 * 1024 * 10, // 10MB buffer for output
+      });
+      
+      logToFile("INFO", "OpenVPN installation output:", stdout);
+      if (stderr) {
+        logToFile("WARN", "OpenVPN installation stderr:", stderr);
+      }
+      
+      // Verify installation
+      try {
+        const openvpnPath = await findOpenVpnPath();
+        logToFile("INFO", "OpenVPN successfully installed at:", openvpnPath);
+        sendProgress(4, "Verifying installation...");
+        sendProgress(5, "Setup complete!");
+        
+        if (Notification.isSupported()) {
+          new Notification({
+            title: "RCP Network",
+            body: "OpenVPN installed successfully!",
+          }).show();
+        }
+        
+        return {
+          installed: true,
+          path: openvpnPath,
+          message: "OpenVPN installed successfully via Homebrew",
+        };
+      } catch (verifyError) {
+        logToFile("ERROR", "OpenVPN installation verification failed:", verifyError.message);
+        
+        if (Notification.isSupported()) {
+          new Notification({
+            title: "RCP Network",
+            body: "OpenVPN installation completed but verification failed. Please restart the app.",
+          }).show();
+        }
+        
+        return {
+          installed: false,
+          error: "OpenVPN installation completed but verification failed. Please restart the application.",
+        };
+      }
+      
+    } catch (error) {
+      logToFile("ERROR", "Failed to install OpenVPN:", error.message);
+      
+      if (Notification.isSupported()) {
+        new Notification({
+          title: "RCP Network",
+          body: "Failed to install OpenVPN. Please install manually.",
+        }).show();
+        }
+      
+      return {
+        installed: false,
+        error: `Failed to install OpenVPN: ${error.message}. Please install manually using: brew install openvpn`,
+      };
+    }
+    
+  } catch (error) {
+    logToFile("ERROR", "Error in installOpenVpnViaBrew:", error.message);
+    return {
+      installed: false,
+      error: `Installation error: ${error.message}`,
+    };
+  }
+};
+
+
 // Find OpenVPN executable path
 const findOpenVpnPath = async () => {
   const platform = process.platform;
@@ -967,7 +1205,7 @@ const findOpenVpnPath = async () => {
       logToFile(
         "WARN",
         "where openvpn failed, trying direct paths...",
-        e.message
+        e.message,
       );
     }
 
@@ -994,7 +1232,7 @@ const findOpenVpnPath = async () => {
     } catch (e) {
       logToFile("ERROR", "OpenVPN not found in PATH or common locations");
       throw new Error(
-        "OpenVPN not found. Please install OpenVPN from https://openvpn.net/community-downloads/"
+        "OpenVPN not found. Please install OpenVPN from https://openvpn.net/community-downloads/",
       );
     }
   } else if (isLinux()) {
@@ -1026,7 +1264,7 @@ const findOpenVpnPath = async () => {
       logToFile(
         "WARN",
         "which openvpn failed, trying direct paths...",
-        e.message
+        e.message,
       );
     }
 
@@ -1055,7 +1293,7 @@ const findOpenVpnPath = async () => {
     } catch (e) {
       logToFile("ERROR", "OpenVPN not found in PATH or common locations");
       throw new Error(
-        "OpenVPN not found. Please install OpenVPN. For Linux: https://community.openvpn.net/openvpn/wiki/OpenvpnSoftwareRepos"
+        "OpenVPN not found. Please install OpenVPN. For Linux: https://community.openvpn.net/openvpn/wiki/OpenvpnSoftwareRepos",
       );
     }
   } else {
@@ -1089,7 +1327,7 @@ const findOpenVpnPath = async () => {
       logToFile(
         "WARN",
         "which openvpn failed, trying direct paths...",
-        e.message
+        e.message,
       );
     }
 
@@ -1119,7 +1357,7 @@ const findOpenVpnPath = async () => {
     } catch (e) {
       logToFile("ERROR", "OpenVPN not found in PATH or common locations");
       throw new Error(
-        "OpenVPN not found. Please install OpenVPN or add it to your PATH."
+        "OpenVPN not found. Please install OpenVPN or add it to your PATH.",
       );
     }
   }
@@ -1130,7 +1368,7 @@ const loadSudoPasswordFromKeychain = async () => {
   try {
     const password = await keytar.getPassword(
       KEYCHAIN_SERVICE,
-      KEYCHAIN_ACCOUNT
+      KEYCHAIN_ACCOUNT,
     );
     if (password) {
       validatedSudoPassword = password;
@@ -1161,6 +1399,48 @@ const deleteSudoPasswordFromKeychain = async () => {
     return true;
   } catch (error) {
     console.error("Error deleting password from keychain:", error);
+    return false;
+  }
+};
+
+// Save VPN credentials to system keychain (per-server)
+const saveVpnCredentials = async (filename, { email, password }) => {
+  try {
+    if (email !== undefined && email !== null) {
+      await keytar.setPassword(VPN_CRED_SERVICE, `${filename}_email`, email);
+    }
+    if (password !== undefined && password !== null) {
+      await keytar.setPassword(VPN_CRED_SERVICE, `${filename}_password`, password);
+    }
+    logToFile("INFO", `VPN credentials saved for ${filename}`);
+    return true;
+  } catch (error) {
+    console.error("Error saving VPN credentials:", error);
+    return false;
+  }
+};
+
+// Load VPN credentials from system keychain (per-server)
+const loadVpnCredentials = async (filename) => {
+  try {
+    const email = await keytar.getPassword(VPN_CRED_SERVICE, `${filename}_email`);
+    const password = await keytar.getPassword(VPN_CRED_SERVICE, `${filename}_password`);
+    return { email: email || null, password: password || null };
+  } catch (error) {
+    console.error("Error loading VPN credentials:", error);
+    return { email: null, password: null };
+  }
+};
+
+// Delete VPN credentials from system keychain (per-server)
+const deleteVpnCredentials = async (filename) => {
+  try {
+    await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_email`).catch(() => {});
+    await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_password`).catch(() => {});
+    logToFile("INFO", `VPN credentials deleted for ${filename}`);
+    return true;
+  } catch (error) {
+    console.error("Error deleting VPN credentials:", error);
     return false;
   }
 };
@@ -1248,7 +1528,7 @@ const processOvpnFile = (filePath) => {
           // Handle both "config" and "config " (with trailing space)
           const regex = new RegExp(
             `^${config.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`,
-            "i"
+            "i",
           );
           if (regex.test(trimmedLine)) {
             modified = true;
@@ -1329,7 +1609,7 @@ ipcMain.handle("open-file-dialog", async () => {
         const timestamp = Date.now();
         finalDestinationPath = path.join(
           VPN_DIRECTORY,
-          `${fileName}_${timestamp}.ovpn`
+          `${fileName}_${timestamp}.ovpn`,
         );
       }
 
@@ -1451,6 +1731,25 @@ ipcMain.handle("validate-sudo-password", async (event, password) => {
         directoryCreated = createResult.usedSudo || false;
       }
 
+      // For macOS: Check if OpenVPN is installed, if not, install via Homebrew
+      let openvpnInstallStatus = null;
+      if (isMacOS()) {
+        try {
+          // Check if OpenVPN is already installed
+          const openvpnPath = await findOpenVpnPath();
+          logToFile("INFO", "OpenVPN already installed at:", openvpnPath);
+          openvpnInstallStatus = { installed: true, path: openvpnPath };
+        } catch (error) {
+          // OpenVPN not found, attempt to install via Homebrew
+          logToFile(
+            "INFO",
+            "OpenVPN not found, attempting to install via Homebrew...",
+          );
+          const win = BrowserWindow.fromWebContents(event.sender);
+          openvpnInstallStatus = await installOpenVpnViaBrew(password, win);
+        }
+      }
+
       return {
         success: true,
         message: directoryCreated
@@ -1458,6 +1757,7 @@ ipcMain.handle("validate-sudo-password", async (event, password) => {
           : "Password validated successfully",
         directoryCreated: directoryCreated,
         directoryExists: directoryExists || directoryCreated,
+        openvpnInstallStatus: openvpnInstallStatus,
       };
     } catch (error) {
       // Check error message to determine if it's invalid password
@@ -1500,21 +1800,23 @@ ipcMain.handle("check-vpn-directory", async () => {
 
 // Get all VPN configurations from directory (Source of Truth)
 ipcMain.handle("get-all-configs", async () => {
-    try {
-        if (!fs.existsSync(VPN_DIRECTORY)) {
-            return [];
-        }
-        const files = fs.readdirSync(VPN_DIRECTORY).filter(file => file.endsWith('.ovpn'));
-        return files.map(file => ({
-            id: file, // Use filename as unique ID to match Tray logic
-            name: file.replace('.ovpn', ''), // Default name
-            filePath: path.join(VPN_DIRECTORY, file),
-            // We can check connection status here too if needed, but App does it via getActiveConnections
-        }));
-    } catch (error) {
-        console.error("Error reading VPN directory:", error);
-        return [];
+  try {
+    if (!fs.existsSync(VPN_DIRECTORY)) {
+      return [];
     }
+    const files = fs
+      .readdirSync(VPN_DIRECTORY)
+      .filter((file) => file.endsWith(".ovpn"));
+    return files.map((file) => ({
+      id: file, // Use filename as unique ID to match Tray logic
+      name: file.replace(".ovpn", ""), // Default name
+      filePath: path.join(VPN_DIRECTORY, file),
+      // We can check connection status here too if needed, but App does it via getActiveConnections
+    }));
+  } catch (error) {
+    console.error("Error reading VPN directory:", error);
+    return [];
+  }
 });
 
 // Check if sudo password is available and valid (from keychain or memory)
@@ -1686,48 +1988,51 @@ const flushDns = async () => {
   logToFile("INFO", "Flushing DNS cache...");
   try {
     if (isWindows()) {
-        // On Windows, ipconfig /flushdns usually requires Admin. 
-        // If the app is not running as admin, this might fail or do nothing for the system cache.
-        // However, we attempt it. If we are already admin, it works.
-        await execAsync('ipconfig /flushdns');
-        logToFile("INFO", "DNS cache flushed (Windows).");
+      // On Windows, ipconfig /flushdns usually requires Admin.
+      // If the app is not running as admin, this might fail or do nothing for the system cache.
+      // However, we attempt it. If we are already admin, it works.
+      await execAsync("ipconfig /flushdns");
+      logToFile("INFO", "DNS cache flushed (Windows).");
     } else if (isMacOS()) {
-        if (validatedSudoPassword) {
-            const escapedPassword = validatedSudoPassword
-              .replace(/'/g, "'\\''")
-              .replace(/\$/g, "\\$")
-              .replace(/`/g, "\\`");
-            // macOS: dscacheutil -flushcache; sudo killall -HUP mDNSResponder
-            // Use sh -c to run both in one sudo session
-            const cmd = `echo '${escapedPassword}' | sudo -S sh -c 'dscacheutil -flushcache; killall -HUP mDNSResponder'`;
-            await execAsync(cmd);
-            logToFile("INFO", "DNS cache flushed (macOS).");
-        } else {
-             logToFile("WARN", "Skipping DNS flush: No sudo password available.");
-        }
+      if (validatedSudoPassword) {
+        const escapedPassword = validatedSudoPassword
+          .replace(/'/g, "'\\''")
+          .replace(/\$/g, "\\$")
+          .replace(/`/g, "\\`");
+        // macOS: dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+        // Use sh -c to run both in one sudo session
+        const cmd = `echo '${escapedPassword}' | sudo -S sh -c 'dscacheutil -flushcache; killall -HUP mDNSResponder'`;
+        await execAsync(cmd);
+        logToFile("INFO", "DNS cache flushed (macOS).");
+      } else {
+        logToFile("WARN", "Skipping DNS flush: No sudo password available.");
+      }
     } else {
-        // Linux: resolvectl is common for systemd-resolved
-        if (validatedSudoPassword) {
-            const escapedPassword = validatedSudoPassword
-              .replace(/'/g, "'\\''")
-              .replace(/\$/g, "\\$")
-              .replace(/`/g, "\\`");
-             const cmd = `echo '${escapedPassword}' | sudo -S resolvectl flush-caches`; 
-             try {
-                await execAsync(cmd);
-                logToFile("INFO", "DNS cache flushed (Linux - resolvectl).");
-             } catch (e) {
-                 // Fallback or ignore if resolvectl not present
-                 logToFile("WARN", "Failed to flush DNS with resolvectl, trying systemd-resolve...");
-                 try {
-                     const cmd2 = `echo '${escapedPassword}' | sudo -S systemd-resolve --flush-caches`;
-                     await execAsync(cmd2);
-                     logToFile("INFO", "DNS cache flushed (Linux - systemd-resolve).");
-                 } catch(ex) {
-                     logToFile("ERROR", "Failed to flush DNS on Linux.");
-                 }
-             }
+      // Linux: resolvectl is common for systemd-resolved
+      if (validatedSudoPassword) {
+        const escapedPassword = validatedSudoPassword
+          .replace(/'/g, "'\\''")
+          .replace(/\$/g, "\\$")
+          .replace(/`/g, "\\`");
+        const cmd = `echo '${escapedPassword}' | sudo -S resolvectl flush-caches`;
+        try {
+          await execAsync(cmd);
+          logToFile("INFO", "DNS cache flushed (Linux - resolvectl).");
+        } catch (e) {
+          // Fallback or ignore if resolvectl not present
+          logToFile(
+            "WARN",
+            "Failed to flush DNS with resolvectl, trying systemd-resolve...",
+          );
+          try {
+            const cmd2 = `echo '${escapedPassword}' | sudo -S systemd-resolve --flush-caches`;
+            await execAsync(cmd2);
+            logToFile("INFO", "DNS cache flushed (Linux - systemd-resolve).");
+          } catch (ex) {
+            logToFile("ERROR", "Failed to flush DNS on Linux.");
+          }
         }
+      }
     }
   } catch (error) {
     logToFile("ERROR", "Failed to flush DNS:", error.message);
@@ -1789,29 +2094,9 @@ const connectVpn = async (data) => {
       }
     }
 
-    // Handle email in .ovpn file based on saveEmail checkbox
-    if (saveEmail) {
-      // Append email to .ovpn file
-      const appendResult = appendEmailToOvpn(filePath, email);
-      if (!appendResult.success) {
-        return { success: false, error: appendResult.error };
-      }
-    } else {
-      // Remove email from .ovpn file if checkbox is unchecked
-      // Only if we effectively want to strip it. But for tray usage, we might want to Preserve existing functionality.
-      // If called from Tray (saveEmail might be undefined), let's skip modification unless explicitly false.
-      if (saveEmail === false) {
-        const removeResult = removeEmailFromOvpn(filePath);
-        if (!removeResult.success) {
-          console.warn(
-            "Warning: Failed to remove email from .ovpn file:",
-            removeResult.error
-          );
-        }
-      }
-    }
-
-    // Note: We'll create auth file below based on saveEmail flag
+    // Note: Credential persistence (save email/password) is now handled
+    // via keytar in the tray-auth-submit and connect-vpn IPC handlers,
+    // not by modifying .ovpn files.
 
     // Build OpenVPN command
     const escapedFilePath = filePath.replace(/'/g, "'\\''");
@@ -1819,7 +2104,7 @@ const connectVpn = async (data) => {
     // Create auth file with email and password
     const tempAuthFile = path.join(
       VPN_DIRECTORY,
-      `.vpn_auth_${Date.now()}.tmp`
+      `.vpn_auth_${Date.now()}.tmp`,
     );
 
     // If password/email are provided, write them.
@@ -1891,7 +2176,7 @@ const connectVpn = async (data) => {
               if (serverId && openvpnProcesses.has(serverId)) {
                 openvpnProcesses.delete(serverId);
               }
-            }
+            },
           );
 
           if (openvpnProcess.stdout) {
@@ -1899,7 +2184,7 @@ const connectVpn = async (data) => {
               const message = d.toString();
               console.log("OpenVPN stdout:", message);
               if (serverId && mainWindow && !mainWindow.isDestroyed()) {
-                  mainWindow.webContents.send('vpn-log', { serverId, message });
+                mainWindow.webContents.send("vpn-log", { serverId, message });
               }
             });
           }
@@ -1908,7 +2193,7 @@ const connectVpn = async (data) => {
               const message = d.toString();
               console.error("OpenVPN stderr:", message);
               if (serverId && mainWindow && !mainWindow.isDestroyed()) {
-                  mainWindow.webContents.send('vpn-log', { serverId, message });
+                mainWindow.webContents.send("vpn-log", { serverId, message });
               }
             });
           }
@@ -1924,86 +2209,88 @@ const connectVpn = async (data) => {
           console.log("OpenVPN process started with PID:", openvpnProcess.pid);
           openvpnProcess.unref();
 
-            if (serverId) {
-              openvpnProcesses.set(serverId, {
-                process: openvpnProcess,
-                filePath: filePath,
-                tempAuthFile: tempAuthFile,
-                startTime: Date.now()
-              });
+          if (serverId) {
+            openvpnProcesses.set(serverId, {
+              process: openvpnProcess,
+              filePath: filePath,
+              tempAuthFile: tempAuthFile,
+              startTime: Date.now(),
+            });
 
-              // Start Duration Ticker
-              // Only supports showing one active duration in Tray Title (MacOS constraint usually)
-              // If multiple are connected, we might need a strategy. For now, last connected wins or just the single one.
-              if (tray) {
-                  const startTime = Date.now();
-                  const ticker = setInterval(() => {
-                      const diff = Date.now() - startTime;
-                      const seconds = Math.floor((diff / 1000) % 60);
-                      const minutes = Math.floor((diff / (1000 * 60)) % 60);
-                      const hours = Math.floor((diff / (1000 * 60 * 60)));
-                      
-                      const timeString = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-                      
-                      if (isMacOS()) {
-                          tray.setTitle(timeString);
-                      } else {
-                          tray.setToolTip(`RCP Network: ${timeString}`);
-                      }
-                      
-                  }, 1000);
-                  durationIntervals.set(serverId, ticker);
+            // Start Duration Ticker
+            // Only supports showing one active duration in Tray Title (MacOS constraint usually)
+            // If multiple are connected, we might need a strategy. For now, last connected wins or just the single one.
+            if (tray) {
+              const startTime = Date.now();
+              const ticker = setInterval(() => {
+                const diff = Date.now() - startTime;
+                const seconds = Math.floor((diff / 1000) % 60);
+                const minutes = Math.floor((diff / (1000 * 60)) % 60);
+                const hours = Math.floor(diff / (1000 * 60 * 60));
+
+                const timeString = `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+
+                if (isMacOS()) {
+                  tray.setTitle(timeString);
+                } else {
+                  tray.setToolTip(`RCP Network: ${timeString}`);
+                }
+              }, 1000);
+              durationIntervals.set(serverId, ticker);
+            }
+
+            openvpnProcess.on("exit", (code, signal) => {
+              if (openvpnProcesses.has(serverId)) {
+                openvpnProcesses.delete(serverId);
+                // Clear tickers
+                if (durationIntervals.has(serverId)) {
+                  clearInterval(durationIntervals.get(serverId));
+                  durationIntervals.delete(serverId);
+                  durationIntervals.delete(serverId);
+                  if (tray && durationIntervals.size === 0) tray.setTitle("");
+                }
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                  mainWindow.webContents.send("vpn-disconnected", {
+                    serverId,
+                    reason: `Process exited with code ${code}`,
+                  });
+                }
+                try {
+                  fs.unlinkSync(tempAuthFile);
+                } catch (e) {}
+                updateTrayMenu(); // Update tray on exit
               }
+            });
+          }
 
-              openvpnProcess.on("exit", (code, signal) => {
-                if (openvpnProcesses.has(serverId)) {
-                    openvpnProcesses.delete(serverId);
-                    // Clear tickers
-                    if (durationIntervals.has(serverId)) {
-                        clearInterval(durationIntervals.get(serverId));
-                        durationIntervals.delete(serverId);
-                        durationIntervals.delete(serverId);
-                        if (tray && durationIntervals.size === 0) tray.setTitle('');
-                    }
-                    if (mainWindow && !mainWindow.isDestroyed()) {
-                        mainWindow.webContents.send("vpn-disconnected", {
-                            serverId,
-                            reason: `Process exited with code ${code}`,
-                        });
-                    }
-                    try {
-                        fs.unlinkSync(tempAuthFile);
-                    } catch (e) {}
-                    updateTrayMenu(); // Update tray on exit
-                }
-             });
-         }
-         
-                if (mainWindow && !mainWindow.isDestroyed()) {
-                  mainWindow.webContents.send("vpn-connected", {
-                    serverId,
-                    startTime: Date.now(),
-                  });
-                }
-         
-                if (mainWindow && !mainWindow.isDestroyed()) {
-                  mainWindow.webContents.send("vpn-connected", {
-                    serverId,
-                    startTime: Date.now(),
-                  });
-                }
-         
-         
-         startTrafficMonitor();
-         flushDns().then(() => {
-            resolve({ success: true, message: 'VPN connection started (Admin Mode)', serverId: serverId });
-         });
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("vpn-connected", {
+              serverId,
+              startTime: Date.now(),
+            });
+          }
+
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("vpn-connected", {
+              serverId,
+              startTime: Date.now(),
+            });
+          }
+
+          startTrafficMonitor();
+          flushDns().then(() => {
+            resolve({
+              success: true,
+              message: "VPN connection started (Admin Mode)",
+              serverId: serverId,
+            });
+          });
         });
       } else {
         // NOT ADMIN: Must trigger UAC
         const logPath = path.join(
           VPN_DIRECTORY,
-          `openvpn_${serverId || Date.now()}.log`
+          `openvpn_${serverId || Date.now()}.log`,
         );
 
         if (fs.existsSync(logPath)) {
@@ -2028,13 +2315,13 @@ const connectVpn = async (data) => {
         logToFile(
           "INFO",
           "Executing elevated OpenVPN command (Requesting UAC)...",
-          psCommand
+          psCommand,
         );
         logToFile("INFO", "Log file:", logPath);
 
         try {
           const { stdout, stderr } = await execAsync(
-            `powershell -Command "${psCommand}"`
+            `powershell -Command "${psCommand}"`,
           );
 
           const pid = parseInt(stdout.trim());
@@ -2059,7 +2346,10 @@ const connectVpn = async (data) => {
                     const message = chunk.toString();
                     console.log("OpenVPN stdout:", message);
                     if (serverId && mainWindow && !mainWindow.isDestroyed()) {
-                        mainWindow.webContents.send('vpn-log', { serverId, message });
+                      mainWindow.webContents.send("vpn-log", {
+                        serverId,
+                        message,
+                      });
                     }
                   });
                   lastSize = stats.size;
@@ -2072,7 +2362,7 @@ const connectVpn = async (data) => {
           const exitMonitor = setInterval(async () => {
             try {
               const { stdout } = await execAsync(
-                `tasklist /FI "PID eq ${pid}" /NH`
+                `tasklist /FI "PID eq ${pid}" /NH`,
               );
               if (!stdout.includes(pid.toString())) {
                 clearInterval(exitMonitor);
@@ -2094,55 +2384,58 @@ const connectVpn = async (data) => {
             } catch (e) {}
           }, 2000);
 
-            if (serverId) {
-              openvpnProcesses.set(serverId, {
-                process: {
-                  pid: pid,
-                  kill: () => {
-                    clearInterval(logPoller);
-                    clearInterval(exitMonitor);
-                  },
-                  unref: () => {}
+          if (serverId) {
+            openvpnProcesses.set(serverId, {
+              process: {
+                pid: pid,
+                kill: () => {
+                  clearInterval(logPoller);
+                  clearInterval(exitMonitor);
                 },
-                filePath: filePath,
-                tempAuthFile: tempAuthFile,
-                logPath: logPath,
-                startTime: Date.now()
-              });
-              
-              // Duration Ticker
-              if (tray) {
-                  const startTime = Date.now();
-                  const ticker = setInterval(() => {
-                      const diff = Date.now() - startTime;
-                      const timeString = new Date(diff).toISOString().substr(11, 8);
-                      
-                      if (isMacOS()) {
-                          tray.setTitle(timeString);
-                      } else {
-                          tray.setToolTip(`RCP Network: ${timeString}`);
-                      }
-                  }, 1000);
-                  durationIntervals.set(serverId, ticker);
-              }
+                unref: () => {},
+              },
+              filePath: filePath,
+              tempAuthFile: tempAuthFile,
+              logPath: logPath,
+              startTime: Date.now(),
+            });
 
-              if (mainWindow && !mainWindow.isDestroyed()) {
-                  mainWindow.webContents.send("vpn-connected", {
-                    serverId,
-                    startTime: Date.now(),
-                  });
-              }
+            // Duration Ticker
+            if (tray) {
+              const startTime = Date.now();
+              const ticker = setInterval(() => {
+                const diff = Date.now() - startTime;
+                const timeString = new Date(diff).toISOString().substr(11, 8);
+
+                if (isMacOS()) {
+                  tray.setTitle(timeString);
+                } else {
+                  tray.setToolTip(`RCP Network: ${timeString}`);
+                }
+              }, 1000);
+              durationIntervals.set(serverId, ticker);
             }
-            
-            
-            startTrafficMonitor();
-            await flushDns();
-            return { success: true, message: 'VPN connection started (Elevated)', serverId: serverId };
+
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send("vpn-connected", {
+                serverId,
+                startTime: Date.now(),
+              });
+            }
+          }
+
+          startTrafficMonitor();
+          await flushDns();
+          return {
+            success: true,
+            message: "VPN connection started (Elevated)",
+            serverId: serverId,
+          };
         } catch (error) {
           logToFile(
             "ERROR",
             "Failed to start elevated process:",
-            error.message
+            error.message,
           );
           // Error handling
           if (
@@ -2199,7 +2492,7 @@ const connectVpn = async (data) => {
           if (serverId) {
             openvpnProcesses.delete(serverId);
           }
-        }
+        },
       );
 
       // Log stderr/stdout listeners ...
@@ -2208,7 +2501,7 @@ const connectVpn = async (data) => {
           const message = d.toString();
           console.error("OpenVPN stderr:", message);
           if (serverId && mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('vpn-log', { serverId, message });
+            mainWindow.webContents.send("vpn-log", { serverId, message });
           }
         });
       }
@@ -2217,7 +2510,7 @@ const connectVpn = async (data) => {
           const message = d.toString();
           console.log("OpenVPN stdout:", message);
           if (serverId && mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('vpn-log', { serverId, message });
+            mainWindow.webContents.send("vpn-log", { serverId, message });
           }
         });
       }
@@ -2230,67 +2523,91 @@ const connectVpn = async (data) => {
       console.log("OpenVPN process started with PID:", openvpnProcess.pid);
       openvpnProcess.unref();
 
-        if (serverId) {
-          openvpnProcesses.set(serverId, {
-            process: openvpnProcess,
-            filePath: filePath,
-            tempAuthFile: tempAuthFile,
-            startTime: Date.now()
-          });
-          
-          // Duration Ticker
-          if (tray) {
-              const startTime = Date.now();
-              const ticker = setInterval(() => {
-                  const diff = Date.now() - startTime;
-                  const timeString = new Date(diff).toISOString().substr(11, 8);
-                  
-                  if (isMacOS()) {
-                      tray.setTitle(timeString);
-                  } else {
-                      tray.setToolTip(`RCP Network: ${timeString}`);
-                  }
-              }, 1000);
-              durationIntervals.set(serverId, ticker);
-          }
-          
-          openvpnProcess.on('exit', (code, signal) => {
-            console.log(`OpenVPN process exited with code ${code}`);
-            if (openvpnProcesses.has(serverId)) {
-               openvpnProcesses.delete(serverId);
-               
-                // Clear tickers
-                if (durationIntervals.has(serverId)) {
-                    clearInterval(durationIntervals.get(serverId));
-                    durationIntervals.delete(serverId);
-                    if (tray && durationIntervals.size === 0) tray.setTitle('');
-                }
+      if (serverId) {
+        openvpnProcesses.set(serverId, {
+          process: openvpnProcess,
+          filePath: filePath,
+          tempAuthFile: tempAuthFile,
+          startTime: Date.now(),
+        });
 
-               if (mainWindow && !mainWindow.isDestroyed()) {
-                 mainWindow.webContents.send('vpn-disconnected', { serverId, reason: `Process exited with code ${code}` });
-               }
-               try { fs.unlinkSync(tempAuthFile); } catch(e) {}
-               updateTrayMenu();
+        // Duration Ticker
+        if (tray) {
+          const startTime = Date.now();
+          const ticker = setInterval(() => {
+            const diff = Date.now() - startTime;
+            const timeString = new Date(diff).toISOString().substr(11, 8);
+
+            if (isMacOS()) {
+              tray.setTitle(timeString);
+            } else {
+              tray.setToolTip(`RCP Network: ${timeString}`);
             }
-          });
+          }, 1000);
+          durationIntervals.set(serverId, ticker);
+        }
+
+        openvpnProcess.on("exit", (code, signal) => {
+          console.log(`OpenVPN process exited with code ${code}`);
+          if (openvpnProcesses.has(serverId)) {
+            openvpnProcesses.delete(serverId);
+
+            // Clear tickers
+            if (durationIntervals.has(serverId)) {
+              clearInterval(durationIntervals.get(serverId));
+              durationIntervals.delete(serverId);
+              if (tray && durationIntervals.size === 0) tray.setTitle("");
+            }
 
             if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send("vpn-connected", {
+              mainWindow.webContents.send("vpn-disconnected", {
                 serverId,
-                startTime: Date.now(),
+                reason: `Process exited with code ${code}`,
               });
             }
-        }
-        startTrafficMonitor();
-        flushDns().then(() => {
-            resolve({ success: true, message: 'VPN connection started', serverId: serverId });
+            try {
+              fs.unlinkSync(tempAuthFile);
+            } catch (e) {}
+            updateTrayMenu();
+          }
         });
+
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("vpn-connected", {
+            serverId,
+            startTime: Date.now(),
+          });
+        }
+      }
+      startTrafficMonitor();
+      flushDns().then(() => {
+        resolve({
+          success: true,
+          message: "VPN connection started",
+          serverId: serverId,
+        });
+      });
     });
   } catch (error) {
     console.error("Error connecting VPN:", error);
     return { success: false, error: error.message || "Failed to connect VPN" };
   }
 };
+
+// VPN Credential IPC Handlers
+ipcMain.handle("save-vpn-credentials", async (event, filename, credentials) => {
+  const success = await saveVpnCredentials(filename, credentials);
+  return { success };
+});
+
+ipcMain.handle("load-vpn-credentials", async (event, filename) => {
+  return await loadVpnCredentials(filename);
+});
+
+ipcMain.handle("delete-vpn-credentials", async (event, filename) => {
+  const success = await deleteVpnCredentials(filename);
+  return { success };
+});
 
 // Connect VPN IPC
 ipcMain.handle("connect-vpn", async (event, data) => {
@@ -2319,27 +2636,27 @@ const disconnectVpn = async (serverId) => {
   try {
     // Clear duration and ticker timers
     if (serverId) {
-        if (connectionTimers.has(serverId)) {
-            clearTimeout(connectionTimers.get(serverId));
-            connectionTimers.delete(serverId);
-        }
-        if (durationIntervals.has(serverId)) {
-            clearInterval(durationIntervals.get(serverId));
-            durationIntervals.delete(serverId);
-            // Reset tray title on disconnect
-            if (tray && durationIntervals.size === 0) tray.setTitle('');
-        }
+      if (connectionTimers.has(serverId)) {
+        clearTimeout(connectionTimers.get(serverId));
+        connectionTimers.delete(serverId);
+      }
+      if (durationIntervals.has(serverId)) {
+        clearInterval(durationIntervals.get(serverId));
+        durationIntervals.delete(serverId);
+        // Reset tray title on disconnect
+        if (tray && durationIntervals.size === 0) tray.setTitle("");
+      }
     } else {
-        // Clear all timers
-        for (const [id, timer] of connectionTimers.entries()) {
-            clearTimeout(timer);
-        }
-        connectionTimers.clear();
-        for (const [id, interval] of durationIntervals.entries()) {
-            clearInterval(interval);
-        }
-        durationIntervals.clear();
-        if (tray) tray.setTitle('');
+      // Clear all timers
+      for (const [id, timer] of connectionTimers.entries()) {
+        clearTimeout(timer);
+      }
+      connectionTimers.clear();
+      for (const [id, interval] of durationIntervals.entries()) {
+        clearInterval(interval);
+      }
+      durationIntervals.clear();
+      if (tray) tray.setTitle("");
     }
 
     if (isWindows()) {
@@ -2439,12 +2756,12 @@ const disconnectVpn = async (serverId) => {
       }
     } else {
       // Linux/macOS: use pkill with sudo if needed
-      
+
       // Ensure sudo password is loaded for disconnect
       if (!validatedSudoPassword) {
-         try {
-             await loadSudoPasswordFromKeychain();
-         } catch(e) {}
+        try {
+          await loadSudoPasswordFromKeychain();
+        } catch (e) {}
       }
 
       const escapedPassword = validatedSudoPassword
@@ -2460,37 +2777,39 @@ const disconnectVpn = async (serverId) => {
         if (processInfo) {
           // Kill specific OpenVPN process by file path
           const escapedFilePath = processInfo.filePath.replace(/'/g, "'\\''");
-          
+
           let killSuccess = false;
-          
+
           // First try to kill by PID if available (more reliable if we have it)
           // But our openvpnProcess.pid is likely the sudo process wrapper.
           // In 'connectVpn', we spawn: `echo ... | sudo -S openvpn ...`
           // The PID is the SHELL.
           // Killing the shell usually does NOT kill the sudo process or openvpn.
           // So we MUST use pkill/pkill.
-          
+
           // Try pkill with sudo
           if (escapedPassword) {
             try {
-                await execAsync(
-                  `echo '${escapedPassword}' | sudo -S pkill -f "openvpn.*${escapedFilePath}"`,
-                  { timeout: 5000 }
-                );
-                killSuccess = true;
-            } catch(e) {
-                console.error("Failed to pkill:", e.message);
+              await execAsync(
+                `echo '${escapedPassword}' | sudo -S pkill -f "openvpn.*${escapedFilePath}"`,
+                { timeout: 5000 },
+              );
+              killSuccess = true;
+            } catch (e) {
+              console.error("Failed to pkill:", e.message);
             }
           } else {
             // If no password, try current user pkill (might work if we own the process, but unlikely if started with sudo)
             try {
-                await execAsync(`pkill -f "openvpn.*${escapedFilePath}"`, {
-                  timeout: 5000,
-                });
-                killSuccess = true;
-            } catch(e) { console.error("Failed to pkill (no sudopass):", e.message); }
+              await execAsync(`pkill -f "openvpn.*${escapedFilePath}"`, {
+                timeout: 5000,
+              });
+              killSuccess = true;
+            } catch (e) {
+              console.error("Failed to pkill (no sudopass):", e.message);
+            }
           }
-          
+
           // Clean up temp auth file
           if (
             processInfo.tempAuthFile &&
@@ -2515,7 +2834,7 @@ const disconnectVpn = async (serverId) => {
           if (escapedPassword) {
             await execAsync(
               `echo '${escapedPassword}' | sudo -S pkill -f openvpn`,
-              { timeout: 5000 }
+              { timeout: 5000 },
             );
           } else {
             await execAsync("pkill -f openvpn", { timeout: 5000 });
@@ -2575,7 +2894,7 @@ ipcMain.handle("delete-vpn-file", async (event, filePath) => {
         "Security check failed:",
         normalizedPath,
         "not in",
-        normalizedVpnDir
+        normalizedVpnDir,
       );
       return { success: false, error: "File is not in VPN directory" };
     }
@@ -2670,142 +2989,143 @@ let awakeExpiry = null; // Store the expiry timestamp
 let awakeTrayInterval = null; // Store interval for tray updates
 
 function stopAwakeMode() {
-    if (awakeFooterId !== null && powerSaveBlocker.isStarted(awakeFooterId)) {
-        powerSaveBlocker.stop(awakeFooterId);
-        awakeFooterId = null;
-    }
-    if (awakeTimer) {
-        clearTimeout(awakeTimer);
-        awakeTimer = null;
-    }
-    if (awakeTrayInterval) {
-        clearInterval(awakeTrayInterval);
-        awakeTrayInterval = null;
-    }
-    awakeDuration = null;
-    awakeExpiry = null;
-    
-    // settings.setSync('awakeMode', { enabled: false }); // Optional persistence
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('awake-status-change', { enabled: false });
-    }
-    updateTrayMenu();
-    updateTrayIcon();
+  if (awakeFooterId !== null && powerSaveBlocker.isStarted(awakeFooterId)) {
+    powerSaveBlocker.stop(awakeFooterId);
+    awakeFooterId = null;
+  }
+  if (awakeTimer) {
+    clearTimeout(awakeTimer);
+    awakeTimer = null;
+  }
+  if (awakeTrayInterval) {
+    clearInterval(awakeTrayInterval);
+    awakeTrayInterval = null;
+  }
+  awakeDuration = null;
+  awakeExpiry = null;
+
+  // settings.setSync('awakeMode', { enabled: false }); // Optional persistence
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("awake-status-change", { enabled: false });
+  }
+  updateTrayMenu();
+  updateTrayIcon();
 }
 
 function startAwakeMode(duration = null) {
-    // Stop previous if exists (but don't emit 'false' event yet to avoid flicker)
-    if (awakeFooterId !== null && powerSaveBlocker.isStarted(awakeFooterId)) {
-        powerSaveBlocker.stop(awakeFooterId);
-        awakeFooterId = null;
-    }
-    if (awakeTimer) {
-        clearTimeout(awakeTimer);
-        awakeTimer = null;
-    }
+  // Stop previous if exists (but don't emit 'false' event yet to avoid flicker)
+  if (awakeFooterId !== null && powerSaveBlocker.isStarted(awakeFooterId)) {
+    powerSaveBlocker.stop(awakeFooterId);
+    awakeFooterId = null;
+  }
+  if (awakeTimer) {
+    clearTimeout(awakeTimer);
+    awakeTimer = null;
+  }
 
-    // Start blocker: prevent-display-sleep (highest level)
-    awakeFooterId = powerSaveBlocker.start('prevent-display-sleep');
-    awakeDuration = duration;
-    
-    // Duration handling
-    let expiry = null;
-    
-    // Clear any existing interval for tray updates
-    if (awakeTrayInterval) {
-        clearInterval(awakeTrayInterval);
-        awakeTrayInterval = null;
-    }
+  // Start blocker: prevent-display-sleep (highest level)
+  awakeFooterId = powerSaveBlocker.start("prevent-display-sleep");
+  awakeDuration = duration;
 
-    if (duration && duration > 0) {
-        expiry = Date.now() + duration;
-        awakeExpiry = expiry; // Global tracking
-        
-        awakeTimer = setTimeout(() => {
-            stopAwakeMode();
-            if (Notification.isSupported()) {
-                new Notification({
-                    title: "RCP Network",
-                    body: "Awake Mode session expired. System can now sleep.",
-                }).show();
-            }
-        }, duration);
+  // Duration handling
+  let expiry = null;
 
-        // Update Tray Title or Menu Item periodically
-        awakeTrayInterval = setInterval(() => {
-            updateTrayMenu();
-        }, 60000); // Update every minute to keep menu fresh? 
-        // Or simpler: We just update menu when opened? No, Tray doesn't have on-open event easily.
-        // We will update the label in updateTrayMenu dynamically based on current time.
-        
-    } else {
-        awakeExpiry = null;
-    }
+  // Clear any existing interval for tray updates
+  if (awakeTrayInterval) {
+    clearInterval(awakeTrayInterval);
+    awakeTrayInterval = null;
+  }
 
+  if (duration && duration > 0) {
+    expiry = Date.now() + duration;
+    awakeExpiry = expiry; // Global tracking
 
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('awake-status-change', { enabled: true, duration, expiry });
-    }
-    updateTrayMenu();
-    updateTrayIcon();
-    return { success: true };
+    awakeTimer = setTimeout(() => {
+      stopAwakeMode();
+      if (Notification.isSupported()) {
+        new Notification({
+          title: "RCP Network",
+          body: "Awake Mode session expired. System can now sleep.",
+        }).show();
+      }
+    }, duration);
+
+    // Update Tray Title or Menu Item periodically
+    awakeTrayInterval = setInterval(() => {
+      updateTrayMenu();
+    }, 60000); // Update every minute to keep menu fresh?
+    // Or simpler: We just update menu when opened? No, Tray doesn't have on-open event easily.
+    // We will update the label in updateTrayMenu dynamically based on current time.
+  } else {
+    awakeExpiry = null;
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("awake-status-change", {
+      enabled: true,
+      duration,
+      expiry,
+    });
+  }
+  updateTrayMenu();
+  updateTrayIcon();
+  return { success: true };
 }
 
-ipcMain.handle('enable-awake-mode', (event, duration) => {
-    startAwakeMode(duration);
-    return { success: true };
+ipcMain.handle("enable-awake-mode", (event, duration) => {
+  startAwakeMode(duration);
+  return { success: true };
 });
 
-ipcMain.handle('disable-awake-mode', () => {
-    stopAwakeMode();
-    return { success: true };
+ipcMain.handle("disable-awake-mode", () => {
+  stopAwakeMode();
+  return { success: true };
 });
 
 function updateTrayIcon() {
-    if (!tray) return;
-    
-    const isAwake = awakeFooterId !== null;
-    let iconPath;
+  if (!tray) return;
 
-    // Determine base icon name
-    const platform = process.platform;
-    let iconName = "";
-    
-    if (platform === "darwin") {
-        iconName = "24x24"; // Start with base name
-    } else if (platform === "win32") {
-        iconName = "48x48";
+  const isAwake = awakeFooterId !== null;
+  let iconPath;
+
+  // Determine base icon name
+  const platform = process.platform;
+  let iconName = "";
+
+  if (platform === "darwin") {
+    iconName = "24x24"; // Start with base name
+  } else if (platform === "win32") {
+    iconName = "48x48";
+  } else {
+    iconName = "48x48";
+  }
+
+  if (isAwake) {
+    iconName += "-green";
+  }
+
+  iconPath = path.join(__dirname, `../icons/tray/${iconName}.png`);
+
+  // Fallback if green icon doesn't exist
+  if (isAwake && !fs.existsSync(iconPath)) {
+    console.log("Green icon not found, reverting to default");
+    iconPath = getTrayIconPath();
+  }
+
+  let icon = nativeImage.createFromPath(iconPath);
+
+  if (isMacOS()) {
+    // Resize to tray standard (usually 22x22 or 18x18 is best for thin bars)
+    // Original code used 17x17 for sleek look.
+    icon = icon.resize({ width: 17, height: 17, quality: "best" });
+
+    // Don't setTemplateImage(true) for colored icon, otherwise macOS masks it to black/white
+    if (!isAwake) {
+      icon.setTemplateImage(true);
     } else {
-        iconName = "48x48";
+      icon.setTemplateImage(false);
     }
+  }
 
-    if (isAwake) {
-        iconName += "-green"; 
-    }
-    
-    iconPath = path.join(__dirname, `../icons/tray/${iconName}.png`);
-    
-    // Fallback if green icon doesn't exist
-    if (isAwake && !fs.existsSync(iconPath)) {
-         console.log("Green icon not found, reverting to default");
-         iconPath = getTrayIconPath(); 
-    }
-
-    let icon = nativeImage.createFromPath(iconPath);
-    
-    if (isMacOS()) {
-        // Resize to tray standard (usually 22x22 or 18x18 is best for thin bars)
-        // Original code used 17x17 for sleek look. 
-        icon = icon.resize({ width: 17, height: 17, quality: "best" });
-        
-        // Don't setTemplateImage(true) for colored icon, otherwise macOS masks it to black/white
-        if (!isAwake) {
-            icon.setTemplateImage(true);
-        } else {
-            icon.setTemplateImage(false);
-        }
-    }
-    
-    tray.setImage(icon);
+  tray.setImage(icon);
 }
-

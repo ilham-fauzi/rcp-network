@@ -61,6 +61,11 @@ A modern RCP Network desktop application built with Electron, React, and Tailwin
 - **macOS Support**:
   - Sudo password validation and storage
   - Support for Homebrew (Intel and Apple Silicon)
+  - **Automatic OpenVPN Installation**: When you first enter your sudo password, the app automatically checks if OpenVPN is installed. If not found, it will:
+    - Check if Homebrew is installed (installs it if needed)
+    - Install OpenVPN via Homebrew in the background
+    - Show progress notifications during installation
+    - Verify installation and notify you when complete
   - Automatic detection of OpenVPN in Homebrew and system paths
 
 ### OpenVPN Detection
@@ -80,7 +85,7 @@ A modern RCP Network desktop application built with Electron, React, and Tailwin
 - **OpenVPN Community Edition**: Must be installed on your system
   - **Windows**: Download from [OpenVPN Community Downloads](https://openvpn.net/community-downloads/)
   - **Linux**: Install via package manager (e.g., `sudo apt install openvpn` or `sudo yum install openvpn`)
-  - **macOS**: Install via Homebrew (`brew install openvpn`) or download from [OpenVPN Community Downloads](https://openvpn.net/community-downloads/)
+  - **macOS**: **Automatically installed via Homebrew** when you first enter your sudo password! Alternatively, install manually using `brew install openvpn` or download from [OpenVPN Community Downloads](https://openvpn.net/community-downloads/)
 - Supported Operating Systems: macOS, Linux, or Windows
 
 ### Steps

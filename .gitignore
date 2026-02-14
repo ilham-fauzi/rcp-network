@@ -27,3 +27,7 @@ yarn-error.log*
 /node_modules
 *.md
 !README.md
+
+# Test files
+test-*
+/simple-test

@@ -115,6 +115,43 @@ const KEYCHAIN_SERVICE = `${APP_NAME}_sudo_password`;
 const KEYCHAIN_ACCOUNT = "sudo_password";
 const VPN_CRED_SERVICE = `${APP_NAME}_vpn_credentials`;
 
+// User preferences file (simple JSON)
+const PREFS_FILE = path.join(VPN_DIRECTORY, "preferences.json");
+
+// Load preferences from disk
+const loadPreferences = () => {
+  try {
+    if (fs.existsSync(PREFS_FILE)) {
+      return JSON.parse(fs.readFileSync(PREFS_FILE, "utf-8"));
+    }
+  } catch (e) {
+    console.error("Error loading preferences:", e);
+  }
+  return {};
+};
+
+// Save preferences to disk
+const savePreferences = (prefs) => {
+  try {
+    fs.writeFileSync(PREFS_FILE, JSON.stringify(prefs, null, 2), "utf-8");
+  } catch (e) {
+    console.error("Error saving preferences:", e);
+  }
+};
+
+// Get a single preference with default
+const getPreference = (key, defaultValue) => {
+  const prefs = loadPreferences();
+  return prefs[key] !== undefined ? prefs[key] : defaultValue;
+};
+
+// Set a single preference
+const setPreference = (key, value) => {
+  const prefs = loadPreferences();
+  prefs[key] = value;
+  savePreferences(prefs);
+};
+
 // Setup logging to file (use VPN_DIRECTORY for logs)
 const LOG_FILE = path.join(VPN_DIRECTORY, "app.log");
 
@@ -129,8 +166,8 @@ const logToFile = (level, message, ...args) => {
   const formattedArgs =
     args.length > 0
       ? args
-          .map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg)))
-          .join(" ")
+        .map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg)))
+        .join(" ")
       : "";
   const logMessage = `[${timestamp}] [${level}] ${message} ${formattedArgs}\n`;
 
@@ -212,12 +249,12 @@ function setupAutoUpdater(win) {
   // Require and configure autoUpdater here (after app is ready)
   const { autoUpdater: updater } = require("electron-updater");
   autoUpdater = updater;
-  
+
   autoUpdater.logger = require("electron-log");
   autoUpdater.logger.transports.file.level = "info";
   autoUpdater.channel = "latest";
   autoUpdater.autoDownload = true;
-  
+
   autoUpdater.on("checking-for-update", () => {
     autoUpdater.logger.info("Checking for updates...");
   });
@@ -507,6 +544,29 @@ function createTray() {
   tray = new Tray(icon);
   tray.setToolTip("RCP Network");
 
+  // Update tray tooltip with timer info if enabled
+  const updateTrayTooltip = () => {
+    if (!tray) return;
+    const showTimer = getPreference("showDurationTimer", true);
+    if (showTimer && openvpnProcesses.size > 0) {
+      const connections = [];
+      for (const [serverId, procInfo] of openvpnProcesses) {
+        const elapsed = procInfo.startTime ? Math.floor((Date.now() - procInfo.startTime) / 1000) : 0;
+        const h = Math.floor(elapsed / 3600);
+        const m = Math.floor((elapsed % 3600) / 60);
+        const s = elapsed % 60;
+        const time = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+        connections.push(`${serverId.replace('.ovpn', '')}: ${time}`);
+      }
+      tray.setToolTip(`RCP Network\n${connections.join('\n')}`);
+    } else {
+      tray.setToolTip("RCP Network");
+    }
+  };
+
+  // Periodically update tooltip
+  setInterval(updateTrayTooltip, 5000);
+
   updateTrayMenu();
 }
 
@@ -537,8 +597,8 @@ function updateTrayMenu() {
             label: file.replace(".ovpn", ""),
             icon: isConnected
               ? nativeImage.createFromPath(
-                  path.join(__dirname, "../icons/png/16x16.png"),
-                )
+                path.join(__dirname, "../icons/png/16x16.png"),
+              )
               : null, // Show icon if connected? Or just text.
             submenu: [
               {
@@ -560,7 +620,7 @@ function updateTrayMenu() {
                       dialog.showErrorBox(
                         "Disconnect Failed",
                         result.message ||
-                          "An unknown error occurred during disconnect.",
+                        "An unknown error occurred during disconnect.",
                       );
                     }
                   } else {
@@ -708,6 +768,18 @@ function updateTrayMenu() {
       ],
     },
     { type: "separator" },
+    {
+      label: getPreference("showDurationTimer", true) ? "⏱ Hide Timer" : "⏱ Show Timer",
+      click: () => {
+        const current = getPreference("showDurationTimer", true);
+        setPreference("showDurationTimer", !current);
+        if (current && tray) {
+          // Turning off — clear tray title immediately
+          tray.setTitle("");
+        }
+        updateTrayMenu(); // Rebuild menu to reflect new label
+      },
+    },
     { label: "Refresh", click: updateTrayMenu },
     {
       label: "Open App",
@@ -818,12 +890,25 @@ function createAuthWindow(serverId, filename, duration, savedCredentials = null)
                  <input type="checkbox" id="savePassword" ${checkSavePassword}>
                  <label for="savePassword">Save Password</label>
             </div>
+            <div style="border-top: 1px solid #374151; margin: 12px 0; padding-top: 12px;">
+                <div class="checkbox-group">
+                     <input type="checkbox" id="applyAll">
+                     <label for="applyAll">Apply to all configs</label>
+                </div>
+                <p id="applyAllHint" style="font-size: 11px; color: #eab308; display: none; margin-top: 4px;">Credentials will be saved to all config files</p>
+            </div>
             <button type="submit" id="connectBtn">Connect</button>
             <button type="button" class="cancel" onclick="window.close()">Cancel</button>
         </form>
         <p class="info" id="status"></p>
         <script>
             const { ipcRenderer } = require('electron');
+            
+            // Show/hide apply all hint
+            document.getElementById('applyAll').addEventListener('change', (e) => {
+                document.getElementById('applyAllHint').style.display = e.target.checked ? 'block' : 'none';
+            });
+            
             document.getElementById('authForm').onsubmit = (e) => {
                 e.preventDefault();
                 const btn = document.getElementById('connectBtn');
@@ -837,12 +922,14 @@ function createAuthWindow(serverId, filename, duration, savedCredentials = null)
                 const password = document.getElementById('password').value;
                 const saveEmail = document.getElementById('saveEmail').checked;
                 const savePassword = document.getElementById('savePassword').checked;
+                const applyAll = document.getElementById('applyAll').checked;
                 
                 ipcRenderer.send('tray-auth-submit', { 
                     email, 
                     password, 
                     saveEmail,
                     savePassword,
+                    applyAll,
                     serverId: '${serverId}', 
                     filename: '${filename}',
                     duration: ${duration ? duration : "null"}
@@ -880,7 +967,7 @@ function createAuthWindow(serverId, filename, duration, savedCredentials = null)
 
 // Handle Form Submit from Auth Window
 ipcMain.on("tray-auth-submit", async (event, data) => {
-  const { email, password, saveEmail, savePassword, serverId, filename, duration } = data;
+  const { email, password, saveEmail, savePassword, applyAll, serverId, filename, duration } = data;
   const filePath = path.join(VPN_DIRECTORY, filename);
   const senderWebContents = event.sender; // To reply back to the window
 
@@ -900,16 +987,32 @@ ipcMain.on("tray-auth-submit", async (event, data) => {
       credsToSave.email = email;
     } else {
       // Delete saved email if unchecked
-      await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_email`).catch(() => {});
+      await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_email`).catch(() => { });
     }
     if (savePassword) {
       credsToSave.password = password;
     } else {
       // Delete saved password if unchecked
-      await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_password`).catch(() => {});
+      await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_password`).catch(() => { });
     }
     if (Object.keys(credsToSave).length > 0) {
       await saveVpnCredentials(filename, credsToSave);
+    }
+
+    // Bulk save credentials to all configs if "Apply to all" is checked
+    if (applyAll) {
+      try {
+        const files = fs.readdirSync(VPN_DIRECTORY).filter((f) => f.endsWith(".ovpn"));
+        const bulkCreds = {};
+        if (saveEmail && email) bulkCreds.email = email;
+        if (savePassword && password) bulkCreds.password = password;
+        if (Object.keys(bulkCreds).length > 0) {
+          await Promise.all(files.map((file) => saveVpnCredentials(file, bulkCreds)));
+          logToFile("INFO", `Tray: Bulk saved credentials to ${files.length} configs`);
+        }
+      } catch (bulkError) {
+        console.error("Error bulk saving from tray:", bulkError);
+      }
     }
 
     // Close the auth window
@@ -1013,7 +1116,7 @@ const installOpenVpnViaBrew = async (sudoPassword, mainWindow = null) => {
   try {
     logToFile("INFO", "Starting OpenVPN installation via Homebrew...");
     sendProgress(1, "Checking OpenVPN installation...");
-    
+
     // Escape password for shell
     const escapedPassword = sudoPassword
       .replace(/'/g, "'\\''")
@@ -1048,37 +1151,37 @@ const installOpenVpnViaBrew = async (sudoPassword, mainWindow = null) => {
 
       logToFile("INFO", "Installing Homebrew...");
       sendProgress(2, "Installing Homebrew package manager...");
-      
+
       // Download and install Homebrew
       // Using the official Homebrew installation script
       const brewInstallCmd = `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`;
-      
+
       try {
         // Run Homebrew installation with sudo password
         await execAsync(brewInstallCmd, {
           timeout: 300000, // 5 minutes timeout
-          env: { 
-            ...process.env, 
+          env: {
+            ...process.env,
             NONINTERACTIVE: "1" // Non-interactive installation
           },
         });
-        
+
         logToFile("INFO", "Homebrew installed successfully");
-        
+
         // Update PATH to include Homebrew
         const brewPath = process.arch === 'arm64' ? '/opt/homebrew/bin' : '/usr/local/bin';
         process.env.PATH = `${brewPath}:${process.env.PATH}`;
-        
+
       } catch (error) {
         logToFile("ERROR", "Failed to install Homebrew:", error.message);
-        
+
         if (Notification.isSupported()) {
           new Notification({
             title: "RCP Network",
             body: "Failed to install Homebrew. Please install manually.",
           }).show();
         }
-        
+
         return {
           installed: false,
           error: "Failed to install Homebrew. Please install it manually from https://brew.sh",
@@ -1096,38 +1199,38 @@ const installOpenVpnViaBrew = async (sudoPassword, mainWindow = null) => {
 
     logToFile("INFO", "Installing OpenVPN via Homebrew...");
     sendProgress(3, "Installing OpenVPN (this may take 2-5 minutes)...");
-    
+
     const envPath = process.env.PATH || "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin";
-    
+
     // Install OpenVPN using brew with sudo password
     const installCmd = `echo '${escapedPassword}' | sudo -S brew install openvpn`;
-    
+
     try {
       const { stdout, stderr } = await execAsync(installCmd, {
         timeout: 600000, // 10 minutes timeout for installation
         env: { ...process.env, PATH: envPath },
         maxBuffer: 1024 * 1024 * 10, // 10MB buffer for output
       });
-      
+
       logToFile("INFO", "OpenVPN installation output:", stdout);
       if (stderr) {
         logToFile("WARN", "OpenVPN installation stderr:", stderr);
       }
-      
+
       // Verify installation
       try {
         const openvpnPath = await findOpenVpnPath();
         logToFile("INFO", "OpenVPN successfully installed at:", openvpnPath);
         sendProgress(4, "Verifying installation...");
         sendProgress(5, "Setup complete!");
-        
+
         if (Notification.isSupported()) {
           new Notification({
             title: "RCP Network",
             body: "OpenVPN installed successfully!",
           }).show();
         }
-        
+
         return {
           installed: true,
           path: openvpnPath,
@@ -1135,36 +1238,36 @@ const installOpenVpnViaBrew = async (sudoPassword, mainWindow = null) => {
         };
       } catch (verifyError) {
         logToFile("ERROR", "OpenVPN installation verification failed:", verifyError.message);
-        
+
         if (Notification.isSupported()) {
           new Notification({
             title: "RCP Network",
             body: "OpenVPN installation completed but verification failed. Please restart the app.",
           }).show();
         }
-        
+
         return {
           installed: false,
           error: "OpenVPN installation completed but verification failed. Please restart the application.",
         };
       }
-      
+
     } catch (error) {
       logToFile("ERROR", "Failed to install OpenVPN:", error.message);
-      
+
       if (Notification.isSupported()) {
         new Notification({
           title: "RCP Network",
           body: "Failed to install OpenVPN. Please install manually.",
         }).show();
-        }
-      
+      }
+
       return {
         installed: false,
         error: `Failed to install OpenVPN: ${error.message}. Please install manually using: brew install openvpn`,
       };
     }
-    
+
   } catch (error) {
     logToFile("ERROR", "Error in installOpenVpnViaBrew:", error.message);
     return {
@@ -1435,8 +1538,8 @@ const loadVpnCredentials = async (filename) => {
 // Delete VPN credentials from system keychain (per-server)
 const deleteVpnCredentials = async (filename) => {
   try {
-    await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_email`).catch(() => {});
-    await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_password`).catch(() => {});
+    await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_email`).catch(() => { });
+    await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_password`).catch(() => { });
     logToFile("INFO", `VPN credentials deleted for ${filename}`);
     return true;
   } catch (error) {
@@ -2223,6 +2326,11 @@ const connectVpn = async (data) => {
             if (tray) {
               const startTime = Date.now();
               const ticker = setInterval(() => {
+                const showTimer = getPreference("showDurationTimer", true);
+                if (!showTimer) {
+                  if (isMacOS()) tray.setTitle("");
+                  return;
+                }
                 const diff = Date.now() - startTime;
                 const seconds = Math.floor((diff / 1000) % 60);
                 const minutes = Math.floor((diff / (1000 * 60)) % 60);
@@ -2257,7 +2365,7 @@ const connectVpn = async (data) => {
                 }
                 try {
                   fs.unlinkSync(tempAuthFile);
-                } catch (e) {}
+                } catch (e) { }
                 updateTrayMenu(); // Update tray on exit
               }
             });
@@ -2296,7 +2404,7 @@ const connectVpn = async (data) => {
         if (fs.existsSync(logPath)) {
           try {
             fs.unlinkSync(logPath);
-          } catch (e) {}
+          } catch (e) { }
         }
 
         const winOpenVpn = openvpnPath;
@@ -2355,7 +2463,7 @@ const connectVpn = async (data) => {
                   lastSize = stats.size;
                 }
               }
-            } catch (e) {}
+            } catch (e) { }
           }, 500);
 
           // Monitor exit
@@ -2377,11 +2485,11 @@ const connectVpn = async (data) => {
                   }
                   try {
                     fs.unlinkSync(tempAuthFile);
-                  } catch (e) {}
+                  } catch (e) { }
                   updateTrayMenu();
                 }
               }
-            } catch (e) {}
+            } catch (e) { }
           }, 2000);
 
           if (serverId) {
@@ -2392,7 +2500,7 @@ const connectVpn = async (data) => {
                   clearInterval(logPoller);
                   clearInterval(exitMonitor);
                 },
-                unref: () => {},
+                unref: () => { },
               },
               filePath: filePath,
               tempAuthFile: tempAuthFile,
@@ -2404,6 +2512,11 @@ const connectVpn = async (data) => {
             if (tray) {
               const startTime = Date.now();
               const ticker = setInterval(() => {
+                const showTimer = getPreference("showDurationTimer", true);
+                if (!showTimer) {
+                  if (isMacOS()) tray.setTitle("");
+                  return;
+                }
                 const diff = Date.now() - startTime;
                 const timeString = new Date(diff).toISOString().substr(11, 8);
 
@@ -2535,6 +2648,11 @@ const connectVpn = async (data) => {
         if (tray) {
           const startTime = Date.now();
           const ticker = setInterval(() => {
+            const showTimer = getPreference("showDurationTimer", true);
+            if (!showTimer) {
+              if (isMacOS()) tray.setTitle("");
+              return;
+            }
             const diff = Date.now() - startTime;
             const timeString = new Date(diff).toISOString().substr(11, 8);
 
@@ -2567,7 +2685,7 @@ const connectVpn = async (data) => {
             }
             try {
               fs.unlinkSync(tempAuthFile);
-            } catch (e) {}
+            } catch (e) { }
             updateTrayMenu();
           }
         });
@@ -2607,6 +2725,45 @@ ipcMain.handle("load-vpn-credentials", async (event, filename) => {
 ipcMain.handle("delete-vpn-credentials", async (event, filename) => {
   const success = await deleteVpnCredentials(filename);
   return { success };
+});
+
+// Bulk Save VPN Credentials IPC
+ipcMain.handle("bulk-save-vpn-credentials", async (event, credentials) => {
+  try {
+    const { email, password, saveEmail, savePassword } = credentials;
+    if (!fs.existsSync(VPN_DIRECTORY)) {
+      return { success: false, error: "VPN directory not found", count: 0 };
+    }
+    const files = fs.readdirSync(VPN_DIRECTORY).filter((f) => f.endsWith(".ovpn"));
+    const credsToSave = {};
+    if (saveEmail && email) credsToSave.email = email;
+    if (savePassword && password) credsToSave.password = password;
+
+    if (Object.keys(credsToSave).length === 0) {
+      return { success: false, error: "No credentials to save", count: 0 };
+    }
+
+    await Promise.all(files.map((file) => saveVpnCredentials(file, credsToSave)));
+    logToFile("INFO", `Bulk saved credentials to ${files.length} configs`);
+    return { success: true, count: files.length };
+  } catch (error) {
+    console.error("Error bulk saving credentials:", error);
+    return { success: false, error: error.message, count: 0 };
+  }
+});
+
+// Timer Preference IPC
+ipcMain.handle("get-timer-preference", async () => {
+  return getPreference("showDurationTimer", true);
+});
+
+ipcMain.handle("set-timer-preference", async (event, value) => {
+  setPreference("showDurationTimer", value);
+  // Immediately clear or restore tray title
+  if (!value && tray) {
+    tray.setTitle("");
+  }
+  return { success: true };
 });
 
 // Connect VPN IPC
@@ -2669,7 +2826,7 @@ const disconnectVpn = async (serverId) => {
           if (processInfo.process.kill) {
             try {
               processInfo.process.kill();
-            } catch (e) {}
+            } catch (e) { }
           }
 
           try {
@@ -2698,7 +2855,7 @@ const disconnectVpn = async (serverId) => {
           if (processInfo.logPath && fs.existsSync(processInfo.logPath)) {
             try {
               fs.unlinkSync(processInfo.logPath);
-            } catch (e) {}
+            } catch (e) { }
           }
 
           openvpnProcesses.delete(serverId);
@@ -2715,12 +2872,12 @@ const disconnectVpn = async (serverId) => {
             if (processInfo.process && processInfo.process.kill) {
               try {
                 processInfo.process.kill();
-              } catch (e) {}
+              } catch (e) { }
             }
             if (processInfo.logPath && fs.existsSync(processInfo.logPath)) {
               try {
                 fs.unlinkSync(processInfo.logPath);
-              } catch (e) {}
+              } catch (e) { }
             }
           }
 
@@ -2761,14 +2918,14 @@ const disconnectVpn = async (serverId) => {
       if (!validatedSudoPassword) {
         try {
           await loadSudoPasswordFromKeychain();
-        } catch (e) {}
+        } catch (e) { }
       }
 
       const escapedPassword = validatedSudoPassword
         ? validatedSudoPassword
-            .replace(/'/g, "'\\''")
-            .replace(/\$/g, "\\$")
-            .replace(/`/g, "\\`")
+          .replace(/'/g, "'\\''")
+          .replace(/\$/g, "\\$")
+          .replace(/`/g, "\\`")
         : "";
 
       if (serverId) {

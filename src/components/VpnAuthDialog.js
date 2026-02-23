@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 
-const VpnAuthDialog = ({ 
-  isVisible, 
-  server, 
-  onConnect, 
+const VpnAuthDialog = ({
+  isVisible,
+  server,
+  onConnect,
   onCancel,
   savedEmail,
   savedPassword
@@ -14,6 +14,7 @@ const VpnAuthDialog = ({
   const [savePassword, setSavePassword] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [applyAll, setApplyAll] = useState(false);
 
   useEffect(() => {
     if (isVisible) {
@@ -35,19 +36,20 @@ const VpnAuthDialog = ({
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
+
     if (!email.trim() || !password.trim()) {
       return;
     }
 
     setIsLoading(true);
-    
+
     try {
       await onConnect({
         email: email.trim(),
         password: password,
         saveEmail: saveEmail,
-        savePassword: savePassword
+        savePassword: savePassword,
+        applyAll: applyAll,
       });
     } finally {
       setIsLoading(false);
@@ -170,6 +172,28 @@ const VpnAuthDialog = ({
                 </label>
               </div>
             </div>
+          </div>
+
+          {/* Apply to All Configs */}
+          <div className="border-t border-gray-700 pt-3">
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="applyAll"
+                checked={applyAll}
+                onChange={(e) => setApplyAll(e.target.checked)}
+                disabled={isLoading}
+                className="w-4 h-4 text-primary bg-gray-700 border-gray-600 rounded focus:ring-primary"
+              />
+              <label htmlFor="applyAll" className="text-sm text-gray-300 cursor-pointer">
+                Apply to all configs
+              </label>
+            </div>
+            {applyAll && (
+              <p className="mt-1 text-xs text-yellow-400">
+                Credentials will be saved to all config files
+              </p>
+            )}
           </div>
 
           <div className="flex gap-3 pt-2">

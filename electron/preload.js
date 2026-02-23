@@ -31,6 +31,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveVpnCredentials: (filename, credentials) => ipcRenderer.invoke('save-vpn-credentials', filename, credentials),
   loadVpnCredentials: (filename) => ipcRenderer.invoke('load-vpn-credentials', filename),
   deleteVpnCredentials: (filename) => ipcRenderer.invoke('delete-vpn-credentials', filename),
+  bulkSaveVpnCredentials: (credentials) => ipcRenderer.invoke('bulk-save-vpn-credentials', credentials),
+  // Timer Preference
+  getTimerPreference: () => ipcRenderer.invoke('get-timer-preference'),
+  setTimerPreference: (value) => ipcRenderer.invoke('set-timer-preference', value),
   onInstallProgress: (callback) => {
     const subscription = (event, progress) => callback(progress);
     ipcRenderer.on('install-progress', subscription);

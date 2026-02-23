@@ -1,11 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 const formatDuration = (ms) => {
   const seconds = Math.floor(ms / 1000);
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
-  
+
   const pad = (n) => n.toString().padStart(2, '0');
   return `${pad(h)}:${pad(m)}:${pad(s)}`;
 };
@@ -23,7 +23,7 @@ const ConnectionTimer = ({ startTime }) => {
   return <span className="font-mono">{formatDuration(duration)}</span>;
 };
 
-const ServerListItem = ({ server, onSelect, onInfo, onDelete, onRename, onConnect, onDisconnect, isConnected, isSelected, startTime }) => {
+const ServerListItem = ({ server, onSelect, onInfo, onDelete, onRename, onConnect, onDisconnect, isConnected, isSelected, startTime, showTimer }) => {
   const getStatusColor = () => {
     // Only show green if this specific server is connected
     if (isConnected) {
@@ -45,7 +45,7 @@ const ServerListItem = ({ server, onSelect, onInfo, onDelete, onRename, onConnec
 
   const handleDelete = async (e) => {
     e.stopPropagation();
-    
+
     // Confirm deletion
     if (window.confirm(`Are you sure you want to delete "${server.name}"? This will also delete the .ovpn file.`)) {
       await onDelete(server);
@@ -69,13 +69,12 @@ const ServerListItem = ({ server, onSelect, onInfo, onDelete, onRename, onConnec
 
   return (
     <div
-      className={`flex items-center justify-between p-3 rounded-lg cursor-pointer transition-colors group ${
-        isConnected 
-          ? 'bg-green-900/30 border border-green-500/50 hover:bg-green-900/40' 
+      className={`flex items-center justify-between p-3 rounded-lg cursor-pointer transition-colors group ${isConnected
+          ? 'bg-green-900/30 border border-green-500/50 hover:bg-green-900/40'
           : isSelected
             ? 'bg-blue-900/30 border border-blue-500/40 hover:bg-blue-900/40'
             : 'border border-transparent hover:bg-gray-800'
-      }`}
+        }`}
       onClick={() => onSelect(server)}
     >
       <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -86,7 +85,7 @@ const ServerListItem = ({ server, onSelect, onInfo, onDelete, onRename, onConnec
         {isConnected && (
           <div className="flex items-center gap-2">
             <span className="text-xs text-green-400 font-semibold bg-green-500/20 px-2 py-0.5 rounded flex-shrink-0">
-              {startTime ? <ConnectionTimer startTime={startTime} /> : 'Connected'}
+              {startTime && showTimer ? <ConnectionTimer startTime={startTime} /> : 'Connected'}
             </span>
           </div>
         )}
@@ -188,11 +187,11 @@ const ServerListItem = ({ server, onSelect, onInfo, onDelete, onRename, onConnec
   );
 };
 
-const ServerList = ({ 
-  servers, 
+const ServerList = ({
+  servers,
   selectedServer,
-  onServerSelect, 
-  onAddProfile, 
+  onServerSelect,
+  onAddProfile,
   onDeleteServer,
   onDeleteAll,
   onRenameServer,
@@ -204,6 +203,21 @@ const ServerList = ({
   isProcessingFile
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
+  const [showTimer, setShowTimer] = useState(true);
+
+  // Load timer preference
+  useEffect(() => {
+    if (window.electronAPI && window.electronAPI.getTimerPreference) {
+      window.electronAPI.getTimerPreference().then(setShowTimer).catch(console.error);
+    }
+    // Listen for timer preference changes
+    const interval = setInterval(() => {
+      if (window.electronAPI && window.electronAPI.getTimerPreference) {
+        window.electronAPI.getTimerPreference().then(setShowTimer).catch(console.error);
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, []);
 
   const filteredServers = servers.filter(server =>
     server.name.toLowerCase().includes(searchQuery.toLowerCase())
@@ -280,21 +294,22 @@ const ServerList = ({
         ) : (
           <>
             <div className="space-y-2 mb-4">
-            {filteredServers.map((server) => (
-              <ServerListItem
-                key={server.id}
-                server={server}
-                onSelect={onServerSelect}
-                onInfo={(server) => console.log('Info:', server)}
-                onDelete={onDeleteServer}
-                onRename={onRenameServer}
-                onConnect={onConnectServer}
-                onDisconnect={onDisconnectServer}
-                isConnected={connectedServers ? connectedServers.has(server.id) : false}
-                isSelected={selectedServer ? selectedServer.id === server.id : false}
-                startTime={serverConnectionDetails && serverConnectionDetails[server.id] ? serverConnectionDetails[server.id].startTime : null}
-              />
-            ))}
+              {filteredServers.map((server) => (
+                <ServerListItem
+                  key={server.id}
+                  server={server}
+                  onSelect={onServerSelect}
+                  onInfo={(server) => console.log('Info:', server)}
+                  onDelete={onDeleteServer}
+                  onRename={onRenameServer}
+                  onConnect={onConnectServer}
+                  onDisconnect={onDisconnectServer}
+                  isConnected={connectedServers ? connectedServers.has(server.id) : false}
+                  isSelected={selectedServer ? selectedServer.id === server.id : false}
+                  startTime={serverConnectionDetails && serverConnectionDetails[server.id] ? serverConnectionDetails[server.id].startTime : null}
+                  showTimer={showTimer}
+                />
+              ))}
             </div>
             {servers.length > 0 && (
               <div className="pt-2 border-t border-gray-800">

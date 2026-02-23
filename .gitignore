@@ -27,6 +27,7 @@ yarn-error.log*
 /node_modules
 *.md
 !README.md
+!RELEASE_*.md
 
 # Test files
 test-*

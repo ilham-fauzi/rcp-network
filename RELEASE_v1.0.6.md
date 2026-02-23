@@ -1,18 +1,9 @@
 ## 🚀 RCP Network v1.0.6
 
-### 🔐 Tray Login & Credential Storage
+### ⏱️ Connection Timer Toggle
 
-- **Standalone tray auth window** — Login form now works correctly on macOS when main window is closed
-- **Secure credential storage** — Credentials stored in system keychain via `keytar`
-- **Save Password checkbox** — Added in both tray and main app auth dialogs
-- **Credential pre-fill** — Saved credentials auto-filled on reconnect
-- **Per-server storage** — Each `.ovpn` profile has its own saved login
-
-### 🎨 UI Improvements
-
-- **Active server highlight** — Selected server shows persistent blue highlight
-- **Always-visible action buttons** — Buttons stay visible on selected/connected server
-- **Fixed chart dimension warning** — Resolved Recharts `ResponsiveContainer` console warning
+- **Hide/Show timer** — Toggle connection duration timer on/off from the footer button
+- **Persistent preference** — Timer visibility saved and restored across sessions
 
 ### 📦 Downloads
 

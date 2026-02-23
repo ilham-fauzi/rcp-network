@@ -1,9 +1,22 @@
 ## 🚀 RCP Network v1.0.6
 
-### ⏱️ Connection Timer Toggle
+### ⏱️ Hide / Show Timer on Tray
 
-- **Hide/Show timer** — Toggle connection duration timer on/off from the footer button
-- **Persistent preference** — Timer visibility saved and restored across sessions
+- **Tray timer toggle** — Added "Show Timer" / "Hide Timer" option directly in the tray context menu to control whether the connection duration is displayed on the macOS menu bar
+- **Persistent preference** — Timer visibility preference is saved to disk and restored automatically on next launch
+- **Instant effect** — Toggling the timer off immediately clears the tray title; toggling on resumes the live counter without reconnecting
+
+### 🌐 Global VPN Config List
+
+- **Shared config source** — VPN profiles are now managed from a single global list, ensuring the tray menu and the main app always show the same up-to-date server list
+- **Auto-sync** — Adding, renaming, or deleting a `.ovpn` profile in the main app is instantly reflected in the tray menu without requiring a restart
+- **Consistent server IDs** — Server identity is now derived consistently from the filename across both the tray and the main window, preventing duplicate or mismatched connection states
+
+### 🎨 UI Improvements
+
+- **Active server highlight** — Selected server in the sidebar now shows a persistent blue highlight so it is always clear which server is queued for connection
+- **Always-visible action buttons** — Connect, Rename, and Delete buttons remain visible on the currently selected or connected server instead of only appearing on hover
+- **Fixed chart dimension warning** — Resolved the Recharts `ResponsiveContainer` console warning caused by rendering at zero height during initial load
 
 ### 📦 Downloads
 

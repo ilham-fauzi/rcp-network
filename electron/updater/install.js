@@ -47,8 +47,8 @@ echo "done"
 // Windows has no positional-argument script here: the values are written
 // into the .cmd file. /D= must be last and unquoted, as NSIS requires.
 const windowsScript = ({ pid, newFile, installDir, workDir }) => {
-  const log = path.join(workDir, "install.log");
-  const exe = path.join(installDir, "RCP Network.exe");
+  const log = path.win32.join(workDir, "install.log");
+  const exe = path.win32.join(installDir, "RCP Network.exe");
   return [
     "@echo off",
     `set LOG="${log}"`,

@@ -930,6 +930,7 @@ function createAuthWindow(serverId, filename, duration, savedCredentials = null)
     modal: !!parentWindow,
     parent: parentWindow || undefined,
     alwaysOnTop: !parentWindow,
+    show: false, // Shown in ready-to-show, after the app is brought to the front
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false, // For simple IPC without preload
@@ -937,6 +938,12 @@ function createAuthWindow(serverId, filename, duration, savedCredentials = null)
   });
 
   authWin.setMenu(null); // Hide menu bar
+
+  // The modal sheet is attached to the main window, so bring that forward too
+  if (parentWindow) {
+    if (parentWindow.isMinimized()) parentWindow.restore();
+    parentWindow.show();
+  }
 
   // macOS: ensure the app is visible and the window gets focus when standalone
   if (process.platform === "darwin" && !parentWindow) {
@@ -1054,6 +1061,11 @@ function createAuthWindow(serverId, filename, duration, savedCredentials = null)
 
   // Show and focus for standalone mode
   authWin.once("ready-to-show", () => {
+    // A tray click does not activate the app on macOS, so focus() alone
+    // leaves the form behind the app the user was in
+    if (process.platform === "darwin") {
+      app.focus({ steal: true });
+    }
     authWin.show();
     authWin.focus();
   });

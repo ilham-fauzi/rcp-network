@@ -251,8 +251,6 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
     const handleTraffic = (data) => {
       setDownloadSpeed(data.download || 0);
       setUploadSpeed(data.upload || 0);
-      setTotalDownload(data.totalDownload || 0);
-      setTotalUpload(data.totalUpload || 0);
       setStats(prev => ({
         ...prev,
         download: `${(data.download || 0).toFixed(2)} MB/s`,

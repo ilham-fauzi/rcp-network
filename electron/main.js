@@ -551,7 +551,7 @@ app.whenReady().then(async () => {
   }
 
   if (!isWindows()) {
-    // Older versions kept the sudo password in the keychain; remove it
+    // Older versions kept the admin password in the keychain; remove it
     await keytar.deletePassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).catch(() => { });
   }
 

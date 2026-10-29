@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import VpnAuthDialog from './VpnAuthDialog';
 import TrafficChart from './TrafficChart';
+import UpdateSection from './UpdateSection';
 
 
 const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChange, triggerConnect, openvpnInstalled = true, connectionStartTime }) => {
@@ -566,9 +567,7 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
           )}
         </div>
 
-        <div>
-          <p>Version {appVersion}</p>
-        </div>
+        <UpdateSection appVersion={appVersion} />
       </div>
 
       {/* VPN Auth Dialog */}

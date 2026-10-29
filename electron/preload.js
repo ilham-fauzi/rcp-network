@@ -18,10 +18,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onVpnLog: (callback) => ipcRenderer.on('vpn-log', callback),
   onVpnDisconnected: (callback) => ipcRenderer.on('vpn-disconnected', callback),
   removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel),
-  onUpdateAvailable: (callback) => ipcRenderer.on('update-available', callback),
-  onUpdateProgress: (callback) => ipcRenderer.on('update-progress', callback),
-  onUpdateDownloaded: (callback) => ipcRenderer.on('update-downloaded', callback),
-  onUpdateError: (callback) => ipcRenderer.on('update-error', callback),
+  // In-app updates
+  checkForUpdates: () => ipcRenderer.invoke('update-check'),
+  installUpdate: () => ipcRenderer.invoke('update-install'),
+  openUpdatePage: () => ipcRenderer.invoke('update-open-page'),
+  getUpdateState: () => ipcRenderer.invoke('update-get-state'),
+  getAutoUpdateCheck: () => ipcRenderer.invoke('get-auto-update-check'),
+  setAutoUpdateCheck: (value) => ipcRenderer.invoke('set-auto-update-check', value),
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   enableAwakeMode: (duration) => ipcRenderer.invoke('enable-awake-mode', duration),
   disableAwakeMode: () => ipcRenderer.invoke('disable-awake-mode'),
@@ -43,7 +46,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       'vpn-disconnected',
       'awake-status-change',
       'vpn-log',
-      'vpn-tick'
+      'vpn-tick',
+      'update-state'
     ];
     if (validChannels.includes(channel)) {
       const subscription = (event, ...args) => callback(...args);

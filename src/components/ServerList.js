@@ -14,10 +14,18 @@ const ConnectionTimer = ({ startTime }) => {
   const [duration, setDuration] = useState(Date.now() - startTime);
 
   React.useEffect(() => {
-    const timer = setInterval(() => {
+    if (!window.electronAPI || !window.electronAPI.on) return;
+
+    const handleTick = () => {
       setDuration(Date.now() - startTime);
-    }, 1000);
-    return () => clearInterval(timer);
+    };
+
+    const unsubscribe = window.electronAPI.on('vpn-tick', handleTick);
+    return () => {
+      if (unsubscribe && window.electronAPI.removeListener) {
+        window.electronAPI.removeListener('vpn-tick', unsubscribe);
+      }
+    };
   }, [startTime]);
 
   return <span className="font-mono">{formatDuration(duration)}</span>;
@@ -210,13 +218,23 @@ const ServerList = ({
     if (window.electronAPI && window.electronAPI.getTimerPreference) {
       window.electronAPI.getTimerPreference().then(setShowTimer).catch(console.error);
     }
-    // Listen for timer preference changes
-    const interval = setInterval(() => {
-      if (window.electronAPI && window.electronAPI.getTimerPreference) {
-        window.electronAPI.getTimerPreference().then(setShowTimer).catch(console.error);
-      }
-    }, 2000);
-    return () => clearInterval(interval);
+
+    // New: Listen for preference changes instead of polling
+    if (window.electronAPI && window.electronAPI.on) {
+      const handlePrefChange = (data) => {
+        // data can be {key, value} if emitted from setPreference
+        if (data && data.key === 'showDurationTimer') {
+          setShowTimer(data.value);
+        }
+      };
+
+      const unsubscribe = window.electronAPI.on('preference-changed', handlePrefChange);
+      return () => {
+        if (unsubscribe && window.electronAPI.removeListener) {
+          window.electronAPI.removeListener('preference-changed', unsubscribe);
+        }
+      };
+    }
   }, []);
 
   const filteredServers = servers.filter(server =>

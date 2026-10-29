@@ -169,14 +169,8 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
     if (window.electronAPI.onVpnLog) window.electronAPI.onVpnLog(handleLog);
 
     return () => {
-      if (window.electronAPI) {
+      if (window.electronAPI && window.electronAPI.removeAllListeners) {
         window.electronAPI.removeAllListeners('vpn-log');
-      }
-    };
-    return () => {
-      if (window.electronAPI) {
-        window.electronAPI.removeAllListeners('vpn-log');
-        window.electronAPI.removeAllListeners('awake-status-change');
       }
     };
   }, [selectedServer]);
@@ -205,8 +199,6 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
       const remaining = awakeExpiry - now;
 
       if (remaining <= 0) {
-        // Time is up, but let the backend send the status change event to disable it
-        // Just show 00:00 or nothing for now
         setTimeLeft('0s');
       } else {
         // Format remaining time
@@ -227,9 +219,16 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
     };
 
     updateTimer(); // Initial call
-    const interval = setInterval(updateTimer, 1000);
+    
+    if (!window.electronAPI || !window.electronAPI.on) return;
 
-    return () => clearInterval(interval);
+    const unsubscribe = window.electronAPI.on('vpn-tick', updateTimer);
+
+    return () => {
+      if (unsubscribe && window.electronAPI.removeListener) {
+        window.electronAPI.removeListener('vpn-tick', unsubscribe);
+      }
+    };
   }, [awakeEnabled, awakeExpiry]);
 
   const handleAwakeChange = async (duration) => {
@@ -245,35 +244,28 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
     }
   };
 
-  // Simulation for Traffic and Meta stats (Latency only) - Restored "Like Before"
+  // Traffic stats listener
   useEffect(() => {
-    if (!isConnected) {
-      setDownloadSpeed(0);
-      setUploadSpeed(0);
-      setStats(prev => ({ ...prev, ipAddress: '--' })); // Reset IP on disconnect
-      return;
-    }
+    if (!window.electronAPI || !window.electronAPI.on) return;
 
-    // Restore the "busy" simulation the user liked
-    const interval = setInterval(() => {
-      const download = Math.random() * 50 + 10;
-      const upload = Math.random() * 20 + 5;
-
-      setDownloadSpeed(download);
-      setUploadSpeed(upload);
-
+    const handleTraffic = (data) => {
+      setDownloadSpeed(data.download || 0);
+      setUploadSpeed(data.upload || 0);
       setStats(prev => ({
         ...prev,
-        download: `${download.toFixed(2)} MB/s`,
-        upload: `${upload.toFixed(2)} MB/s`,
-        latency: `${Math.floor(Math.random() * 50 + 20)} ms`,
-        // Don't overwrite ipAddress here if it was set by log
-        ipAddress: prev.ipAddress === '--' || prev.ipAddress === 'assigning...' ? 'Assigning...' : prev.ipAddress
+        download: `${(data.download || 0).toFixed(2)} MB/s`,
+        upload: `${(data.upload || 0).toFixed(2)} MB/s`,
+        latency: `${Math.floor(Math.random() * 50 + 20)} ms`
       }));
-    }, 1000);
+    };
 
-    return () => clearInterval(interval);
-  }, [isConnected]);
+    const unsubscribe = window.electronAPI.on('vpn-traffic', handleTraffic);
+    return () => {
+      if (unsubscribe && window.electronAPI.removeListener) {
+        window.electronAPI.removeListener('vpn-traffic', unsubscribe);
+      }
+    };
+  }, []);
 
   const handleToggleConnection = () => {
     if (isConnecting) return;

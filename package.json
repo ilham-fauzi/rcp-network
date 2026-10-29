@@ -11,6 +11,7 @@
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
+    "test": "node --test test/",
     "electron": "electron .",
     "electron-dev": "ELECTRON_IS_DEV=1 electron .",
     "dev": "concurrently \"npm start\" \"wait-on http://localhost:3000 -t 60000 && ELECTRON_IS_DEV=1 electron .\"",
@@ -78,11 +79,21 @@
       "node_modules/keytar/**/*"
     ],
     "extraFiles": [],
+    "extraResources": [
+      {
+        "from": "electron/helper/rcp-network-helper",
+        "to": "helper/rcp-network-helper"
+      },
+      {
+        "from": "electron/helper/bundle-openvpn",
+        "to": "helper/bundle-openvpn"
+      }
+    ],
     "mac": {
       "category": "public.app-category.networking",
       "target": [
-        "dmg",
-        "pkg"
+        { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "pkg", "arch": ["x64", "arm64"] }
       ],
       "icon": "icons/mac/icon.icns",
       "hardenedRuntime": true,

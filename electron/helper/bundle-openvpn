@@ -1,0 +1,134 @@
+#!/bin/sh
+# RCP Network: make a private copy of a Homebrew OpenVPN (macOS only).
+#
+#   bundle-openvpn <source-openvpn> <dest-dir>
+#
+# Copies the binary to <dest-dir>/bin/openvpn and every library it loads from
+# /opt/homebrew or /usr/local to <dest-dir>/lib/, points every reference at
+# @loader_path/../lib/<name>, re-signs each file ad hoc, and checks the copy
+# runs and loads nothing from Homebrew. Setup runs it as root into a
+# root-owned folder, so the copy does not change when Homebrew does.
+#
+# POSIX sh on purpose: macOS ships bash 3.2.
+
+set -e
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+unset DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH DYLD_FALLBACK_LIBRARY_PATH
+
+fail() {
+  echo "bundle-openvpn: $*" >&2
+  exit 1
+}
+
+[ $# -eq 2 ] || fail "usage: bundle-openvpn <source-openvpn> <dest-dir>"
+[ "$(uname -s)" = Darwin ] || fail "macOS only"
+
+for tool in otool install_name_tool codesign; do
+  if ! xcrun --find "$tool" >/dev/null 2>&1 && ! [ -x "/Library/Developer/CommandLineTools/usr/bin/$tool" ]; then
+    fail "$tool is missing; run 'xcode-select --install' and try again"
+  fi
+done
+
+# Print the real path of $1 (symlinks resolved).
+real_path() {
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$1" 2>/dev/null
+    return
+  fi
+  p=$1
+  n=0
+  while [ -L "$p" ]; do
+    n=$((n + 1))
+    [ "$n" -le 40 ] || return 1
+    t=$(readlink "$p") || return 1
+    case $t in
+      /*) p=$t ;;
+      *) p=$(dirname "$p")/$t ;;
+    esac
+  done
+  [ -e "$p" ] || return 1
+  d=$(cd -P "$(dirname "$p")" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$d" "$(basename "$p")"
+}
+
+# The libraries a file loads (its own id included for a library).
+deps() {
+  otool -L "$1" | awk '/^[ \t]/ { print $1 }'
+}
+
+src=$(real_path "$1") || fail "source not found: $1"
+[ -f "$src" ] || fail "source is not a file: $src"
+dest=$2
+case $dest in
+  /*) ;;
+  *) fail "destination must be an absolute path: $dest" ;;
+esac
+case $dest in
+  *[[:space:]]*) fail "destination must not contain spaces: $dest" ;;
+esac
+[ -d "$dest" ] || fail "destination folder not found: $dest"
+
+mkdir -p "$dest/bin" "$dest/lib"
+cp "$src" "$dest/bin/openvpn"
+chmod 755 "$dest/bin/openvpn"
+
+# 1. Copy every Homebrew library, again and again, until none is left.
+todo=$dest/bin/openvpn
+while [ -n "$todo" ]; do
+  next=
+  for f in $todo; do
+    for dep in $(deps "$f"); do
+      case $dep in
+        /opt/homebrew/*|/usr/local/*) ;;
+        *) continue ;;
+      esac
+      leaf=$(basename "$dep")
+      [ -e "$dest/lib/$leaf" ] && continue
+      lib=$(real_path "$dep") || fail "library not found: $dep"
+      cp "$lib" "$dest/lib/$leaf"
+      chmod 644 "$dest/lib/$leaf"
+      next="$next $dest/lib/$leaf"
+    done
+  done
+  todo=$next
+done
+
+# 2. Point each reference at the copy, and give each library its own id.
+for f in "$dest/bin/openvpn" "$dest"/lib/*; do
+  [ -f "$f" ] || continue
+  case $f in
+    "$dest"/lib/*) install_name_tool -id "@loader_path/../lib/$(basename "$f")" "$f" 2>/dev/null ;;
+  esac
+  for dep in $(deps "$f"); do
+    case $dep in
+      /opt/homebrew/*|/usr/local/*)
+        install_name_tool -change "$dep" "@loader_path/../lib/$(basename "$dep")" "$f" 2>/dev/null
+        ;;
+    esac
+  done
+done
+
+# 3. install_name_tool breaks the signatures; re-sign every file ad hoc.
+for f in "$dest"/lib/* "$dest/bin/openvpn"; do
+  [ -f "$f" ] || continue
+  codesign --force -s - "$f" 2>/dev/null || fail "cannot sign $f"
+done
+
+# 4. The copy must run and must not load anything from Homebrew.
+out=$("$dest/bin/openvpn" --version 2>&1) || case $out in
+  "OpenVPN "*) ;; # OpenVPN before 2.6 exits 1 after printing its version
+  *) fail "the copy does not run: $out" ;;
+esac
+case $out in
+  "OpenVPN "*) ;;
+  *) fail "the copy does not run: $out" ;;
+esac
+for f in "$dest/bin/openvpn" "$dest"/lib/*; do
+  [ -f "$f" ] || continue
+  if deps "$f" | grep -E -q '^(/opt/homebrew/|/usr/local/)'; then
+    fail "$f still loads a library from Homebrew"
+  fi
+done
+
+echo "bundle-openvpn: copied $src to $dest"

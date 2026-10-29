@@ -1,13 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import ServerList from './components/ServerList';
 import ConnectionControl from './components/ConnectionControl';
-import SudoPasswordDialog from './components/SudoPasswordDialog';
 import RenameDialog from './components/RenameDialog';
 import OpenVpnWarning from './components/OpenVpnWarning';
 
 // Storage utility
 const STORAGE_KEY = 'vpn-servers';
-const SUDO_PASSWORD_CHECKED_KEY = 'sudo-password-checked';
 
 const loadServers = () => {
   try {
@@ -27,30 +25,12 @@ const saveServers = (servers) => {
   }
 };
 
-const hasSudoPasswordBeenChecked = () => {
-  try {
-    return localStorage.getItem(SUDO_PASSWORD_CHECKED_KEY) === 'true';
-  } catch (error) {
-    return false;
-  }
-};
-
-const setSudoPasswordChecked = () => {
-  try {
-    localStorage.setItem(SUDO_PASSWORD_CHECKED_KEY, 'true');
-  } catch (error) {
-    console.error('Error saving sudo password check status:', error);
-  }
-};
-
 function App() {
   const [selectedServer, setSelectedServer] = useState(null);
   const [servers, setServers] = useState([]);
   const [isProcessingFile, setIsProcessingFile] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
-  const [showSudoDialog, setShowSudoDialog] = useState(false);
-  const [sudoPasswordValidated, setSudoPasswordValidated] = useState(false);
   const [connectedServers, setConnectedServers] = useState(new Set()); // Track connected server IDs
   const [serverConnectionDetails, setServerConnectionDetails] = useState({}); // Track details like startTime
   const [showRenameDialog, setShowRenameDialog] = useState(false);
@@ -83,20 +63,7 @@ function App() {
           console.error("Failed to load configs:", err);
       }
 
-      // 1. Check Directory/Password
-      try {
-        const dirStatus = await window.electronAPI.checkVpnDirectory();
-        const passwordValid = await window.electronAPI.checkSudoPassword();
-        if (!dirStatus.exists || !passwordValid) {
-          setShowSudoDialog(true);
-        } else {
-          setSudoPasswordValidated(true);
-        }
-      } catch (error) {
-        setShowSudoDialog(true);
-      }
-
-      // 2. Sync Active Connections
+      // 1. Sync Active Connections
       try {
         const active = await window.electronAPI.getActiveConnections();
         if (active) {
@@ -121,7 +88,7 @@ function App() {
         console.error('Failed to sync connections:', error);
       }
 
-      // 3. Listen for disconnection events
+      // 2. Listen for disconnection events
       window.electronAPI.onVpnDisconnected((event, { serverId, reason }) => {
          console.log(`Server ${serverId} disconnected: ${reason}`);
          setConnectedServers(prev => {
@@ -136,7 +103,7 @@ function App() {
          });
       });
 
-      // 4. Listen for connection events (e.g. from Tray)
+      // 3. Listen for connection events (e.g. from Tray)
       if (window.electronAPI.onVpnConnected) {
           window.electronAPI.onVpnConnected((event, { serverId, startTime }) => {
              console.log(`Server ${serverId} connected`);
@@ -415,20 +382,6 @@ function App() {
     }
   };
 
-  const handleSudoPasswordSubmit = (password) => {
-    // Password has been validated by the dialog component
-    setSudoPasswordValidated(true);
-    setShowSudoDialog(false);
-    setSudoPasswordChecked();
-  };
-
-  const handleSudoPasswordCancel = () => {
-    // User cancelled, but we still allow them to use the app
-    // In production, you might want to exit the app here
-    setShowSudoDialog(false);
-    setSudoPasswordChecked(); // Mark as checked so dialog doesn't show again
-  };
-
   const handleCheckOpenVpnAgain = async () => {
     if (!window.electronAPI) return;
     
@@ -446,6 +399,18 @@ function App() {
     }
   };
 
+  const handleInstallOpenVpn = async () => {
+    if (!window.electronAPI || !window.electronAPI.installOpenVpn) return { success: false };
+
+    const result = await window.electronAPI.installOpenVpn();
+    if (result.success) {
+      await handleCheckOpenVpnAgain();
+    } else if (result.needsManualInstall && result.guide) {
+      setOpenvpnStatus(prev => ({ ...prev, installationGuide: result.guide }));
+    }
+    return result;
+  };
+
   return (
     <>
       <div className="h-screen w-screen flex bg-gray-900 overflow-hidden">
@@ -457,6 +422,7 @@ function App() {
               platform={openvpnStatus.platform}
               installationGuide={openvpnStatus.installationGuide}
               onCheckAgain={handleCheckOpenVpnAgain}
+              onInstall={openvpnStatus.platform === 'macOS' ? handleInstallOpenVpn : null}
             />
           </div>
         )}
@@ -518,13 +484,6 @@ function App() {
           />
         </div>
       </div>
-
-      {/* Sudo Password Dialog */}
-      <SudoPasswordDialog
-        isVisible={showSudoDialog}
-        onPasswordSubmit={handleSudoPasswordSubmit}
-        onCancel={handleSudoPasswordCancel}
-      />
 
       {/* Rename Dialog */}
       <RenameDialog

@@ -1,0 +1,343 @@
+#!/bin/sh
+# RCP Network privileged helper.
+#
+# Installed once, root-owned, at a fixed path and allowed through a single
+# sudoers rule (NOPASSWD, this file only). The app runs every privileged
+# action as `sudo -n <this file> <command>`, so it never needs the person's
+# password after setup.
+#
+#   --version                     print HELPER_VERSION
+#   connect <config> <auth-file>  start OpenVPN for a config in ~/.rcp-network
+#   disconnect <config>           stop the OpenVPN started for that config
+#   disconnect-all                stop every OpenVPN this helper started
+#   flush-dns                     flush the system DNS cache
+#
+# Every refusal exits 2 and prints "refused: <reason>" on stderr.
+#
+# POSIX sh on purpose: macOS ships bash 3.2 and Linux may have no bash.
+
+HELPER_VERSION=1
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+umask 077
+
+FORBIDDEN_DIRECTIVES="plugin up down route-up route-pre-down ipchange learn-address tls-verify auth-user-pass-verify client-connect client-disconnect config cd chroot log log-append status writepid management iproute tls-crypt-v2-verify"
+
+OPENVPN_CANDIDATES="/opt/homebrew/sbin/openvpn /usr/local/sbin/openvpn /usr/sbin/openvpn /usr/local/bin/openvpn /usr/bin/openvpn"
+
+refuse() {
+  echo "refused: $*" >&2
+  exit 2
+}
+
+OS=$(uname -s)
+RUN_UID=$(id -u)
+DRY_RUN=0
+
+# --- whose files are allowed -------------------------------------------------
+
+resolve_user() {
+  if [ "$RUN_UID" -eq 0 ]; then
+    uid=${SUDO_UID:-0}
+  else
+    uid=$RUN_UID
+  fi
+  case $uid in
+    ''|*[!0-9]*) refuse "invalid invoking uid" ;;
+  esac
+  TARGET_UID=$uid
+  TARGET_USER=$(id -nu "$uid" 2>/dev/null) || refuse "unknown user $uid"
+  [ -n "$TARGET_USER" ] || refuse "unknown user $uid"
+
+  # Test mode: only honoured when not root, so it opens no bypass.
+  if [ "$RUN_UID" -ne 0 ] && [ -n "$RCP_HELPER_TEST_HOME" ]; then
+    TARGET_HOME=$RCP_HELPER_TEST_HOME
+  elif [ "$OS" = Darwin ]; then
+    TARGET_HOME=$(dscl . -read "/Users/$TARGET_USER" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: *//p')
+  else
+    TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+  fi
+  [ -n "$TARGET_HOME" ] || refuse "no home folder for $TARGET_USER"
+
+  ALLOWED_DIR=$(real_path "$TARGET_HOME/.rcp-network") || refuse "no ~/.rcp-network folder"
+  [ -d "$ALLOWED_DIR" ] || refuse "~/.rcp-network is not a folder"
+}
+
+# --- paths --------------------------------------------------------------------
+
+# Print the real path of $1 (symlinks resolved). Fails if it does not exist.
+real_path() {
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$1" 2>/dev/null
+    return
+  fi
+  # Old macOS has no realpath: follow symlinks by hand, then pwd -P.
+  p=$1
+  n=0
+  while [ -L "$p" ]; do
+    n=$((n + 1))
+    [ "$n" -le 40 ] || return 1
+    t=$(readlink "$p") || return 1
+    case $t in
+      /*) p=$t ;;
+      *) p=$(dirname "$p")/$t ;;
+    esac
+  done
+  [ -e "$p" ] || return 1
+  d=$(cd -P "$(dirname "$p")" 2>/dev/null && pwd -P) || return 1
+  b=$(basename "$p")
+  if [ -d "$p" ]; then
+    (cd -P "$p" 2>/dev/null && pwd -P)
+  elif [ "$d" = / ]; then
+    printf '/%s\n' "$b"
+  else
+    printf '%s/%s\n' "$d" "$b"
+  fi
+}
+
+# Print the real path of $2 after checking it is a regular file directly
+# inside the allowed folder. $1 names the file in refusal messages.
+checked_file() {
+  [ -n "$2" ] || refuse "$1 path missing"
+  r=$(real_path "$2") || refuse "$1 not found"
+  [ "$(dirname "$r")" = "$ALLOWED_DIR" ] || refuse "$1 is outside ~/.rcp-network"
+  [ -f "$r" ] && [ ! -L "$r" ] || refuse "$1 is not a regular file"
+  printf '%s\n' "$r"
+}
+
+hash_id() {
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | cut -c1-32
+  else
+    printf '%s' "$1" | sha256sum | cut -c1-32
+  fi
+}
+
+find_openvpn() {
+  for c in $OPENVPN_CANDIDATES; do
+    if [ -f "$c" ] && [ -x "$c" ]; then
+      printf '%s\n' "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+owner_uid() {
+  if [ "$OS" = Darwin ]; then
+    stat -f %u "$1"
+  else
+    stat -c %u "$1"
+  fi
+}
+
+prepare_pid_dir() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    PID_DIR=$(mktemp -d "${TMPDIR:-/tmp}/rcp-network-helper.XXXXXX") || refuse "cannot create temp folder"
+    trap 'rm -rf "$PID_DIR"' EXIT
+    return
+  fi
+  [ "$RUN_UID" -eq 0 ] || refuse "must run as root (through sudo -n)"
+  if [ "$OS" = Darwin ]; then
+    PID_DIR=/var/run/rcp-network
+  else
+    PID_DIR=/run/rcp-network
+  fi
+  if [ -L "$PID_DIR" ]; then
+    refuse "$PID_DIR is a symlink"
+  fi
+  if [ ! -d "$PID_DIR" ]; then
+    mkdir -m 700 "$PID_DIR" || refuse "cannot create $PID_DIR"
+  fi
+  chown 0 "$PID_DIR" && chmod 700 "$PID_DIR" || refuse "cannot secure $PID_DIR"
+  [ "$(owner_uid "$PID_DIR")" = 0 ] || refuse "$PID_DIR is not owned by root"
+}
+
+# Copy $1 to $2 reading it with the invoking user's rights, so a file swapped
+# after the checks can only expose what the user could already read.
+copy_as_user() {
+  rm -f "$2"
+  if [ "$RUN_UID" -eq 0 ] && [ "$TARGET_UID" -ne 0 ]; then
+    sudo -n -u "#$TARGET_UID" /bin/cat -- "$1" > "$2" || return 1
+  else
+    /bin/cat -- "$1" > "$2" || return 1
+  fi
+  chmod 600 "$2"
+}
+
+# Print the first forbidden directive found in $1, if any. Checks every
+# non-comment line, after leading whitespace, an optional leading "--", and
+# inline "<directive>" block tags; case-insensitive.
+forbidden_directive() {
+  awk -v list="$FORBIDDEN_DIRECTIVES" '
+    BEGIN { n = split(list, a, " "); for (i = 1; i <= n; i++) bad[a[i]] = 1 }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      sub(/^[ \t\f\v]+/, "", line)
+      if (line == "" || line ~ /^[#;]/) next
+      tok = line
+      sub(/[ \t\f\v].*$/, "", tok)
+      gsub(/["\047\\]/, "", tok)
+      sub(/^<\/?/, "", tok)
+      sub(/>.*$/, "", tok)
+      sub(/^--/, "", tok)
+      tok = tolower(tok)
+      if (tok in bad) { print tok; exit 1 }
+    }' "$1"
+}
+
+# --- stopping -----------------------------------------------------------------
+
+remove_entry() {
+  rm -f "$PID_DIR/$1.pid" "$PID_DIR/$1.conf" "$PID_DIR/$1.auth"
+}
+
+# Prints the PID recorded for entry $1 if that process is an openvpn.
+running_pid() {
+  f="$PID_DIR/$1.pid"
+  [ -f "$f" ] || return 1
+  pid=$(head -n 1 "$f" | tr -d ' \r\n')
+  case $pid in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  comm=$(ps -p "$pid" -o comm= 2>/dev/null) || return 1
+  comm=$(printf '%s' "$comm" | tr -d ' \n')
+  [ "${comm##*/}" = openvpn ] || return 1
+  printf '%s\n' "$pid"
+}
+
+stop_entry() {
+  if pid=$(running_pid "$1"); then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "kill -TERM $pid"
+    else
+      kill -TERM "$pid" 2>/dev/null
+    fi
+  fi
+  remove_entry "$1"
+}
+
+# Remove leftovers of OpenVPN runs that ended on their own.
+collect_stale() {
+  for f in "$PID_DIR"/*.pid "$PID_DIR"/*.conf; do
+    [ -e "$f" ] || continue
+    b=$(basename "$f")
+    id=${b%.*}
+    running_pid "$id" >/dev/null || remove_entry "$id"
+  done
+}
+
+# --- commands -----------------------------------------------------------------
+
+cmd_connect() {
+  [ $# -eq 2 ] || refuse "usage: connect <config> <auth-file>"
+  resolve_user
+  config=$(checked_file config "$1") || exit 2
+  auth=$(checked_file "auth file" "$2") || exit 2
+  openvpn=$(find_openvpn) || refuse "OpenVPN not found in the fixed locations"
+
+  prepare_pid_dir
+  id=$(hash_id "$config")
+  if [ "$DRY_RUN" -eq 0 ]; then
+    collect_stale
+    stop_entry "$id"
+  fi
+
+  conf_copy="$PID_DIR/$id.conf"
+  auth_copy="$PID_DIR/$id.auth"
+  copy_as_user "$config" "$conf_copy" || { remove_entry "$id"; refuse "cannot read config"; }
+  copy_as_user "$auth" "$auth_copy" || { remove_entry "$id"; refuse "cannot read auth file"; }
+
+  if ! bad=$(forbidden_directive "$conf_copy"); then
+    remove_entry "$id"
+    refuse "config uses forbidden directive '$bad'"
+  fi
+
+  cd "$ALLOWED_DIR" || refuse "cannot enter ~/.rcp-network"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "$openvpn --config $conf_copy --script-security 1 --auth-user-pass $auth_copy --writepid $PID_DIR/$id.pid"
+    exit 0
+  fi
+
+  exec "$openvpn" --config "$conf_copy" --script-security 1 \
+    --auth-user-pass "$auth_copy" --writepid "$PID_DIR/$id.pid"
+}
+
+cmd_disconnect() {
+  [ $# -eq 1 ] || refuse "usage: disconnect <config>"
+  resolve_user
+  [ -n "$1" ] || refuse "config path missing"
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    config=$(checked_file config "$1") || exit 2
+  else
+    # The file may be gone since connect; the folder must still be ours.
+    d=$(real_path "$(dirname "$1")") || refuse "config is outside ~/.rcp-network"
+    [ "$d" = "$ALLOWED_DIR" ] || refuse "config is outside ~/.rcp-network"
+    config="$d/$(basename "$1")"
+  fi
+  prepare_pid_dir
+  stop_entry "$(hash_id "$config")"
+  exit 0
+}
+
+cmd_disconnect_all() {
+  [ $# -eq 0 ] || refuse "usage: disconnect-all"
+  prepare_pid_dir
+  for f in "$PID_DIR"/*.pid; do
+    [ -e "$f" ] || continue
+    b=$(basename "$f")
+    stop_entry "${b%.pid}"
+  done
+  collect_stale
+  exit 0
+}
+
+cmd_flush_dns() {
+  [ $# -eq 0 ] || refuse "usage: flush-dns"
+  if [ "$OS" = Darwin ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "dscacheutil -flushcache; killall -HUP mDNSResponder"
+      exit 0
+    fi
+    [ "$RUN_UID" -eq 0 ] || refuse "must run as root (through sudo -n)"
+    dscacheutil -flushcache
+    killall -HUP mDNSResponder
+    exit 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "resolvectl flush-caches || systemd-resolve --flush-caches"
+    exit 0
+  fi
+  [ "$RUN_UID" -eq 0 ] || refuse "must run as root (through sudo -n)"
+  if command -v resolvectl >/dev/null 2>&1 && resolvectl flush-caches; then
+    exit 0
+  fi
+  if command -v systemd-resolve >/dev/null 2>&1 && systemd-resolve --flush-caches; then
+    exit 0
+  fi
+  echo "no DNS cache flush tool found" >&2
+  exit 1
+}
+
+# --- main ---------------------------------------------------------------------
+
+if [ "${1:-}" = "--dry-run" ]; then
+  # Test mode: only honoured when not root.
+  [ "$RUN_UID" -ne 0 ] && DRY_RUN=1
+  shift
+fi
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+
+case $cmd in
+  --version) echo "$HELPER_VERSION" ;;
+  connect) cmd_connect "$@" ;;
+  disconnect) cmd_disconnect "$@" ;;
+  disconnect-all) cmd_disconnect_all "$@" ;;
+  flush-dns) cmd_flush_dns "$@" ;;
+  *) refuse "unknown command '$cmd'" ;;
+esac

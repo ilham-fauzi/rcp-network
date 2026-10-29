@@ -20,6 +20,8 @@ const util = require("util");
 const execAsync = util.promisify(exec);
 const keytar = require("keytar");
 const privileged = require("./privileged");
+const { createUpdater, AUTO_CHECK_KEY } = require("./updater");
+const { DOWNLOAD_PAGE } = require("./updater/logic");
 const si = require("systeminformation");
 const isDev = process.env.ELECTRON_IS_DEV === "1";
 const { EventEmitter } = require('events');
@@ -29,9 +31,6 @@ const appEvents = new EventEmitter();
 const isWindows = () => process.platform === "win32";
 const isLinux = () => process.platform === "linux";
 const isMacOS = () => process.platform === "darwin";
-
-// autoUpdater will be configured after app is ready
-let autoUpdater = null;
 
 // Global App Heartbeat and Traffic Monitor
 let heartbeatInterval = null;
@@ -142,7 +141,6 @@ function stopAppHeartbeat() {
   }
 }
 
-// autoUpdater logger will be configured in setupAutoUpdater
 
 
 // App configuration (must be defined before LOG_FILE)
@@ -296,55 +294,6 @@ let mainWindow = null;
 let tray = null;
 let connectionTimers = new Map(); // Store timeouts for duration disconnects
 
-// Auto-update logic
-function setupAutoUpdater(win) {
-  // Require and configure autoUpdater here (after app is ready)
-  const { autoUpdater: updater } = require("electron-updater");
-  autoUpdater = updater;
-
-  autoUpdater.logger = require("electron-log");
-  autoUpdater.logger.transports.file.level = "info";
-  autoUpdater.channel = "latest";
-  autoUpdater.autoDownload = true;
-
-  autoUpdater.on("checking-for-update", () => {
-    autoUpdater.logger.info("Checking for updates...");
-  });
-
-  autoUpdater.on("update-available", (info) => {
-    autoUpdater.logger.info("Update available: " + info.version);
-    win.webContents.send("update-available", info);
-  });
-
-  autoUpdater.on("update-not-available", (info) => {
-    autoUpdater.logger.info("Update not available.");
-  });
-
-  autoUpdater.on("error", (err) => {
-    autoUpdater.logger.error("Error in auto-updater: " + err);
-    win.webContents.send("update-error", err.message);
-  });
-
-  autoUpdater.on("download-progress", (progressObj) => {
-    let log_message = "Download speed: " + progressObj.bytesPerSecond;
-    log_message = log_message + " - Downloaded " + progressObj.percent + "%";
-    log_message =
-      log_message +
-      " (" +
-      progressObj.transferred +
-      "/" +
-      progressObj.total +
-      ")";
-    autoUpdater.logger.info(log_message);
-    win.webContents.send("update-progress", progressObj);
-  });
-
-  autoUpdater.on("update-downloaded", (info) => {
-    autoUpdater.logger.info("Update downloaded");
-    win.webContents.send("update-downloaded", info);
-  });
-}
-
 function createWindow() {
   const win = new BrowserWindow({
     width: 1200,
@@ -366,15 +315,7 @@ function createWindow() {
 
   mainWindow = win;
 
-  // Setup auto-updater
-  setupAutoUpdater(win);
-
-  // Check for updates when window is shown
   win.once("ready-to-show", () => {
-    // Small delay to ensure UI is ready to receive events if needed
-    setTimeout(() => {
-      autoUpdater.checkForUpdatesAndNotify();
-    }, 3000);
     win.show();
   });
 
@@ -571,6 +512,9 @@ app.whenReady().then(async () => {
       }
     });
   }
+
+  // Quiet check at most once a day when "Check for updates automatically" is on
+  getUpdater().checkIfDue();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -909,6 +853,17 @@ function updateTrayMenu() {
         } else {
           createWindow(); // Recreate if destroyed
         }
+      },
+    },
+    {
+      label: "Check for Updates",
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.show();
+        } else {
+          createWindow();
+        }
+        getUpdater().check({ quiet: false });
       },
     },
     { label: "Quit", click: () => app.quit() },
@@ -2425,6 +2380,80 @@ ipcMain.handle("get-active-connections", async () => {
 
 ipcMain.handle("get-app-version", () => {
   return app.getVersion();
+});
+
+// OpenVPN processes still running, waiting up to 5 s for them to exit
+const countOpenvpnProcesses = async () => {
+  let count = 0;
+  for (let i = 0; i < 10; i++) {
+    try {
+      if (isWindows()) {
+        const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq openvpn.exe" /NH');
+        count = (stdout.match(/openvpn\.exe/gi) || []).length;
+      } else {
+        const { stdout } = await execAsync("pgrep -x openvpn");
+        count = stdout.trim().split("\n").filter(Boolean).length;
+      }
+    } catch (e) {
+      // pgrep exits 1 when nothing matches
+      count = 0;
+    }
+    if (count === 0) return 0;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return count;
+};
+
+// In-app updates: checked here, installed after quit by a detached helper.
+// The stored sudo password is never involved.
+let updater = null;
+const getUpdater = () => {
+  if (!updater) {
+    updater = createUpdater({
+      currentVersion: app.getVersion(),
+      isPackaged: app.isPackaged,
+      userDataDir: app.getPath("userData"),
+      prefs: { get: getPreference, set: setPreference },
+      getActiveCount: () => openvpnProcesses.size,
+      disconnectAll: () => disconnectVpn(null),
+      openvpnLeft: countOpenvpnProcesses,
+      confirm: async (message) => {
+        const options = {
+          type: "warning",
+          buttons: ["Continue", "Cancel"],
+          defaultId: 0,
+          cancelId: 1,
+          message,
+        };
+        const result =
+          mainWindow && !mainWindow.isDestroyed()
+            ? await dialog.showMessageBox(mainWindow, options)
+            : await dialog.showMessageBox(options);
+        return result.response === 0;
+      },
+      quit: () => app.quit(),
+      send: (state) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("update-state", state);
+        }
+      },
+      log: (...args) => logToFile("INFO", ...args),
+    });
+  }
+  return updater;
+};
+
+ipcMain.handle("update-check", () => getUpdater().check({ quiet: false }));
+ipcMain.handle("update-install", () => getUpdater().installAndRestart());
+ipcMain.handle("update-get-state", () => getUpdater().getState());
+ipcMain.handle("update-open-page", () => {
+  const { pageUrl } = getUpdater().getState();
+  return shell.openExternal(pageUrl || DOWNLOAD_PAGE);
+});
+ipcMain.handle("get-auto-update-check", () => getPreference(AUTO_CHECK_KEY, true));
+ipcMain.handle("set-auto-update-check", (event, value) => {
+  setPreference(AUTO_CHECK_KEY, Boolean(value));
+  return Boolean(value);
 });
 
 const disconnectVpn = async (serverId) => {

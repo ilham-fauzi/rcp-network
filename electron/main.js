@@ -19,6 +19,7 @@ const { exec, spawn } = require("child_process");
 const util = require("util");
 const execAsync = util.promisify(exec);
 const keytar = require("keytar");
+const privileged = require("./privileged");
 const si = require("systeminformation");
 const isDev = process.env.ELECTRON_IS_DEV === "1";
 const { EventEmitter } = require('events');
@@ -543,14 +544,33 @@ app.whenReady().then(async () => {
   logToFile("INFO", "App path:", app.getAppPath());
   logToFile("INFO", "Log file:", LOG_FILE);
 
-  // Load sudo password from keychain if available
-  const passwordLoaded = await loadSudoPasswordFromKeychain();
-  if (passwordLoaded) {
-    logToFile("INFO", "Sudo password loaded from keychain");
+  // ~/.rcp-network is created as the user, no admin rights needed
+  const dirResult = await createVpnDirectory();
+  if (!dirResult.success) {
+    logToFile("ERROR", "Failed to create VPN directory:", dirResult.error);
+  }
+
+  if (!isWindows()) {
+    // Older versions kept the sudo password in the keychain; remove it
+    await keytar.deletePassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).catch(() => { });
   }
 
   createWindow();
   createTray();
+
+  if (!isWindows()) {
+    // One admin prompt the first time (or after the helper was removed or
+    // changed version); a no-op once the helper is installed.
+    ensurePrivilegedHelper().then((result) => {
+      if (result.ok) {
+        logToFile("INFO", result.setupRan ? "Privileged helper installed" : "Privileged helper ready");
+      } else if (result.cancelled) {
+        logToFile("WARN", "Helper setup cancelled; it will be offered again on connect");
+      } else {
+        logToFile("ERROR", "Helper setup failed:", result.error || result.reason);
+      }
+    });
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -1181,8 +1201,35 @@ app.on("web-contents-created", (event, contents) => {
   });
 });
 
-// Store validated sudo password (in memory, also saved to keychain)
-let validatedSudoPassword = null;
+// Privileged helper (Linux/macOS): installed once, then every privileged
+// action runs as `sudo -n <helper> <command>` without a password.
+const HELPER_PATH = privileged.helperInstallPath(process.platform);
+const escapedHelperPath = HELPER_PATH.replace(/'/g, "'\\''");
+
+let helperSetupPromise = null;
+const ensurePrivilegedHelper = () => {
+  if (isWindows()) return Promise.resolve({ ok: true, setupRan: false });
+  // Startup and a connect may ask at the same time; share one prompt
+  if (!helperSetupPromise) {
+    helperSetupPromise = privileged
+      .ensureHelper(privileged.defaultRun, process.platform, {
+        sourceHelper: privileged.helperSourcePath({
+          isPackaged: app.isPackaged,
+          resourcesPath: process.resourcesPath,
+        }),
+        user: os.userInfo().username,
+      })
+      .catch((error) => ({ ok: false, error: error.message }))
+      .finally(() => {
+        helperSetupPromise = null;
+      });
+  }
+  return helperSetupPromise;
+};
+
+// Run a helper command through sudo -n (never prompts)
+const runHelper = (args, options = {}) =>
+  privileged.defaultRun("sudo", ["-n", HELPER_PATH, ...args], { timeout: 10000, ...options });
 
 // Platform detection helpers
 
@@ -1205,90 +1252,41 @@ const getInstallationGuide = (platform) => {
   return "https://openvpn.net/community-downloads/";
 };
 
-// Install OpenVPN via Homebrew (macOS only)
-const installOpenVpnViaBrew = async (sudoPassword, mainWindow = null) => {
+// Install OpenVPN via Homebrew (macOS only), as the user. Without Homebrew
+// the person gets the install guide; Homebrew is not installed for them.
+const installOpenVpnViaBrew = async (mainWindow = null) => {
   const sendProgress = (step, message) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('install-progress', { step, message });
     }
   };
+  const envPath = `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || "/usr/bin:/bin:/usr/sbin:/sbin"}`;
   try {
     logToFile("INFO", "Starting OpenVPN installation via Homebrew...");
-    sendProgress(1, "Checking OpenVPN installation...");
+    sendProgress(1, "Checking Homebrew...");
 
-    // Escape password for shell
-    const escapedPassword = sudoPassword
-      .replace(/'/g, "'\\''")
-      .replace(/\$/g, "\\$")
-      .replace(/`/g, "\\`");
-
-    // Step 1: Check if Homebrew is installed
-    let brewInstalled = false;
+    let brewPath;
     try {
-      const envPath = process.env.PATH || "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin";
-      await execAsync("which brew", {
+      const { stdout } = await execAsync("command -v brew", {
         timeout: 3000,
         env: { ...process.env, PATH: envPath },
       });
-      brewInstalled = true;
-      logToFile("INFO", "Homebrew is already installed");
-      sendProgress(2, "Homebrew found, preparing installation...");
+      brewPath = stdout.trim();
     } catch (error) {
-      logToFile("WARN", "Homebrew not found, will attempt to install it");
-      sendProgress(2, "Homebrew not found, will install it first...");
+      brewPath = "";
     }
 
-    // Step 2: Install Homebrew if not present
-    if (!brewInstalled) {
-      // Show notification
-      if (Notification.isSupported()) {
-        new Notification({
-          title: "RCP Network",
-          body: "Installing Homebrew package manager...",
-        }).show();
-      }
-
-      logToFile("INFO", "Installing Homebrew...");
-      sendProgress(2, "Installing Homebrew package manager...");
-
-      // Download and install Homebrew
-      // Using the official Homebrew installation script
-      const brewInstallCmd = `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`;
-
-      try {
-        // Run Homebrew installation with sudo password
-        await execAsync(brewInstallCmd, {
-          timeout: 300000, // 5 minutes timeout
-          env: {
-            ...process.env,
-            NONINTERACTIVE: "1" // Non-interactive installation
-          },
-        });
-
-        logToFile("INFO", "Homebrew installed successfully");
-
-        // Update PATH to include Homebrew
-        const brewPath = process.arch === 'arm64' ? '/opt/homebrew/bin' : '/usr/local/bin';
-        process.env.PATH = `${brewPath}:${process.env.PATH}`;
-
-      } catch (error) {
-        logToFile("ERROR", "Failed to install Homebrew:", error.message);
-
-        if (Notification.isSupported()) {
-          new Notification({
-            title: "RCP Network",
-            body: "Failed to install Homebrew. Please install manually.",
-          }).show();
-        }
-
-        return {
-          installed: false,
-          error: "Failed to install Homebrew. Please install it manually from https://brew.sh",
-        };
-      }
+    if (!brewPath) {
+      logToFile("WARN", "Homebrew not found; showing the install guide");
+      return {
+        success: false,
+        installed: false,
+        needsManualInstall: true,
+        guide: getInstallationGuide("macOS"),
+        error: "Homebrew is not installed. Install OpenVPN using the guide.",
+      };
     }
 
-    // Step 3: Install OpenVPN via Homebrew
     if (Notification.isSupported()) {
       new Notification({
         title: "RCP Network",
@@ -1297,15 +1295,10 @@ const installOpenVpnViaBrew = async (sudoPassword, mainWindow = null) => {
     }
 
     logToFile("INFO", "Installing OpenVPN via Homebrew...");
-    sendProgress(3, "Installing OpenVPN (this may take 2-5 minutes)...");
-
-    const envPath = process.env.PATH || "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin";
-
-    // Install OpenVPN using brew with sudo password
-    const installCmd = `echo '${escapedPassword}' | sudo -S brew install openvpn`;
+    sendProgress(2, "Installing OpenVPN (this may take 2-5 minutes)...");
 
     try {
-      const { stdout, stderr } = await execAsync(installCmd, {
+      const { stdout, stderr } = await execAsync(`'${brewPath.replace(/'/g, "'\\''")}' install openvpn`, {
         timeout: 600000, // 10 minutes timeout for installation
         env: { ...process.env, PATH: envPath },
         maxBuffer: 1024 * 1024 * 10, // 10MB buffer for output
@@ -1315,42 +1308,6 @@ const installOpenVpnViaBrew = async (sudoPassword, mainWindow = null) => {
       if (stderr) {
         logToFile("WARN", "OpenVPN installation stderr:", stderr);
       }
-
-      // Verify installation
-      try {
-        const openvpnPath = await findOpenVpnPath();
-        logToFile("INFO", "OpenVPN successfully installed at:", openvpnPath);
-        sendProgress(4, "Verifying installation...");
-        sendProgress(5, "Setup complete!");
-
-        if (Notification.isSupported()) {
-          new Notification({
-            title: "RCP Network",
-            body: "OpenVPN installed successfully!",
-          }).show();
-        }
-
-        return {
-          installed: true,
-          path: openvpnPath,
-          message: "OpenVPN installed successfully via Homebrew",
-        };
-      } catch (verifyError) {
-        logToFile("ERROR", "OpenVPN installation verification failed:", verifyError.message);
-
-        if (Notification.isSupported()) {
-          new Notification({
-            title: "RCP Network",
-            body: "OpenVPN installation completed but verification failed. Please restart the app.",
-          }).show();
-        }
-
-        return {
-          installed: false,
-          error: "OpenVPN installation completed but verification failed. Please restart the application.",
-        };
-      }
-
     } catch (error) {
       logToFile("ERROR", "Failed to install OpenVPN:", error.message);
 
@@ -1362,20 +1319,49 @@ const installOpenVpnViaBrew = async (sudoPassword, mainWindow = null) => {
       }
 
       return {
+        success: false,
         installed: false,
+        guide: getInstallationGuide("macOS"),
         error: `Failed to install OpenVPN: ${error.message}. Please install manually using: brew install openvpn`,
       };
     }
 
+    sendProgress(3, "Verifying installation...");
+    try {
+      const openvpnPath = await findOpenVpnPath();
+      logToFile("INFO", "OpenVPN successfully installed at:", openvpnPath);
+      sendProgress(4, "Setup complete!");
+
+      if (Notification.isSupported()) {
+        new Notification({
+          title: "RCP Network",
+          body: "OpenVPN installed successfully!",
+        }).show();
+      }
+
+      return {
+        success: true,
+        installed: true,
+        path: openvpnPath,
+        message: "OpenVPN installed successfully via Homebrew",
+      };
+    } catch (verifyError) {
+      logToFile("ERROR", "OpenVPN installation verification failed:", verifyError.message);
+      return {
+        success: false,
+        installed: false,
+        error: "OpenVPN installation completed but verification failed. Please restart the application.",
+      };
+    }
   } catch (error) {
     logToFile("ERROR", "Error in installOpenVpnViaBrew:", error.message);
     return {
+      success: false,
       installed: false,
       error: `Installation error: ${error.message}`,
     };
   }
 };
-
 
 // Find OpenVPN executable path
 const findOpenVpnPath = async () => {
@@ -1565,46 +1551,6 @@ const findOpenVpnPath = async () => {
   }
 };
 
-// Load sudo password from keychain on startup
-const loadSudoPasswordFromKeychain = async () => {
-  try {
-    const password = await keytar.getPassword(
-      KEYCHAIN_SERVICE,
-      KEYCHAIN_ACCOUNT,
-    );
-    if (password) {
-      validatedSudoPassword = password;
-      return true;
-    }
-    return false;
-  } catch (error) {
-    console.error("Error loading password from keychain:", error);
-    return false;
-  }
-};
-
-// Save sudo password to keychain
-const saveSudoPasswordToKeychain = async (password) => {
-  try {
-    await keytar.setPassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, password);
-    return true;
-  } catch (error) {
-    console.error("Error saving password to keychain:", error);
-    return false;
-  }
-};
-
-// Delete sudo password from keychain
-const deleteSudoPasswordFromKeychain = async () => {
-  try {
-    await keytar.deletePassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
-    return true;
-  } catch (error) {
-    console.error("Error deleting password from keychain:", error);
-    return false;
-  }
-};
-
 // Save VPN credentials to system keychain (per-server)
 const saveVpnCredentials = async (filename, { email, password }) => {
   try {
@@ -1658,42 +1604,13 @@ const checkVpnDirectory = () => {
   }
 };
 
-// Create VPN directory (may require sudo)
-const createVpnDirectory = async (password) => {
+// Create VPN directory in the user's home, as the user
+const createVpnDirectory = async () => {
   try {
-    // First, try to create without sudo
-    try {
-      if (!fs.existsSync(VPN_DIRECTORY)) {
-        fs.mkdirSync(VPN_DIRECTORY, { recursive: true, mode: 0o755 });
-      }
-      return { success: true, usedSudo: false };
-    } catch (error) {
-      // If failed, try with sudo
-      if (password) {
-        const escapedPassword = password
-          .replace(/'/g, "'\\''")
-          .replace(/\$/g, "\\$")
-          .replace(/`/g, "\\`");
-        const escapedDir = VPN_DIRECTORY.replace(/'/g, "'\\''");
-        const command = `echo '${escapedPassword}' | sudo -S mkdir -p '${escapedDir}' && echo '${escapedPassword}' | sudo -S chmod 755 '${escapedDir}'`;
-
-        try {
-          await execAsync(command, { timeout: 5000 });
-          return { success: true, usedSudo: true };
-        } catch (sudoError) {
-          return {
-            success: false,
-            error:
-              "Failed to create directory with sudo. Please check your password.",
-          };
-        }
-      } else {
-        return {
-          success: false,
-          error: "Directory creation requires sudo password",
-        };
-      }
+    if (!fs.existsSync(VPN_DIRECTORY)) {
+      fs.mkdirSync(VPN_DIRECTORY, { recursive: true, mode: 0o755 });
     }
+    return { success: true };
   } catch (error) {
     return {
       success: false,
@@ -1806,14 +1723,15 @@ ipcMain.handle("open-file-dialog", async () => {
     try {
       fs.accessSync(originalFilePath, fs.constants.R_OK);
 
-      // Use VPN directory in home folder (~/.vpn_client)
-      // Ensure directory exists (should be created during sudo password validation)
+      // Use VPN directory in home folder (~/.rcp-network)
       if (!checkVpnDirectory()) {
-        return {
-          canceled: false,
-          error:
-            "VPN directory does not exist. Please restart the application and enter sudo password.",
-        };
+        const createResult = await createVpnDirectory();
+        if (!createResult.success) {
+          return {
+            canceled: false,
+            error: createResult.error || "Failed to create VPN directory",
+          };
+        }
       }
 
       // Copy file to VPN directory
@@ -1871,146 +1789,12 @@ ipcMain.handle("open-file-dialog", async () => {
   }
 });
 
-// Validate sudo password
-ipcMain.handle("validate-sudo-password", async (event, password) => {
-  try {
-    // Skip validation for Windows - no sudo needed
-    if (isWindows()) {
-      // Just create directory if needed
-      const directoryExists = checkVpnDirectory();
-      let directoryCreated = false;
-
-      if (!directoryExists) {
-        const createResult = await createVpnDirectory(null); // No password needed for Windows
-        if (!createResult.success) {
-          return {
-            success: false,
-            error: createResult.error || "Failed to create VPN directory",
-          };
-        }
-        directoryCreated = createResult.usedSudo || false;
-      }
-
-      return {
-        success: true,
-        message: directoryCreated
-          ? "Directory created successfully"
-          : "Ready to use",
-        directoryCreated: directoryCreated,
-        directoryExists: directoryExists || directoryCreated,
-      };
-    }
-
-    // For Linux/macOS: validate sudo password
-    // Test password by trying to run a sudo command
-    // Use -S flag to read password from stdin
-    // Escape special characters in password
-    const escapedPassword = password
-      .replace(/'/g, "'\\''")
-      .replace(/\$/g, "\\$")
-      .replace(/`/g, "\\`");
-
-    // Use a safer method: write password to a temporary approach
-    // For security, we'll use sudo -S with echo piped
-    const testCommand = `echo '${escapedPassword}' | sudo -S -v 2>&1`;
-
-    try {
-      const { stdout, stderr } = await execAsync(testCommand, {
-        timeout: 5000,
-        maxBuffer: 1024,
-      });
-
-      // Check if sudo succeeded (no error output means success)
-      if (stderr && stderr.includes("Sorry, try again")) {
-        return {
-          success: false,
-          error: "Invalid password. Please try again.",
-        };
-      }
-
-      // Password is valid, store it in memory and save to keychain
-      validatedSudoPassword = password;
-      await saveSudoPasswordToKeychain(password);
-
-      // Check if VPN directory exists, create if needed
-      const directoryExists = checkVpnDirectory();
-      let directoryCreated = false;
-
-      if (!directoryExists) {
-        const createResult = await createVpnDirectory(password);
-        if (!createResult.success) {
-          return {
-            success: false,
-            error: createResult.error || "Failed to create VPN directory",
-          };
-        }
-        directoryCreated = createResult.usedSudo || false;
-      }
-
-      // For macOS: Check if OpenVPN is installed, if not, install via Homebrew
-      let openvpnInstallStatus = null;
-      if (isMacOS()) {
-        try {
-          // Check if OpenVPN is already installed
-          const openvpnPath = await findOpenVpnPath();
-          logToFile("INFO", "OpenVPN already installed at:", openvpnPath);
-          openvpnInstallStatus = { installed: true, path: openvpnPath };
-        } catch (error) {
-          // OpenVPN not found, attempt to install via Homebrew
-          logToFile(
-            "INFO",
-            "OpenVPN not found, attempting to install via Homebrew...",
-          );
-          const win = BrowserWindow.fromWebContents(event.sender);
-          openvpnInstallStatus = await installOpenVpnViaBrew(password, win);
-        }
-      }
-
-      return {
-        success: true,
-        message: directoryCreated
-          ? "Password validated and directory created successfully"
-          : "Password validated successfully",
-        directoryCreated: directoryCreated,
-        directoryExists: directoryExists || directoryCreated,
-        openvpnInstallStatus: openvpnInstallStatus,
-      };
-    } catch (error) {
-      // Check error message to determine if it's invalid password
-      if (error.stderr && error.stderr.includes("Sorry, try again")) {
-        return {
-          success: false,
-          error: "Invalid password. Please try again.",
-        };
-      }
-
-      // Other errors
-      return {
-        success: false,
-        error: "Failed to validate password. Please try again.",
-      };
-    }
-  } catch (error) {
-    console.error("Error validating sudo password:", error);
-    return {
-      success: false,
-      error: error.message || "Failed to validate password",
-    };
-  }
-});
-
-// Get validated sudo password (for use in VPN operations)
-ipcMain.handle("get-sudo-password", async () => {
-  return validatedSudoPassword;
-});
-
 // Check VPN directory status
 ipcMain.handle("check-vpn-directory", async () => {
   const exists = checkVpnDirectory();
   return {
     exists: exists,
     path: VPN_DIRECTORY,
-    needsSudo: !exists, // If doesn't exist, might need sudo
   };
 });
 
@@ -2033,65 +1817,6 @@ ipcMain.handle("get-all-configs", async () => {
     console.error("Error reading VPN directory:", error);
     return [];
   }
-});
-
-// Check if sudo password is available and valid (from keychain or memory)
-ipcMain.handle("check-sudo-password", async () => {
-  // Skip for Windows - no sudo needed
-  if (isWindows()) {
-    return true;
-  }
-
-  // If not in memory, try to load from keychain
-  if (!validatedSudoPassword) {
-    const loaded = await loadSudoPasswordFromKeychain();
-    if (!loaded) {
-      return false;
-    }
-  }
-
-  // Validate password by testing with sudo -v
-  if (validatedSudoPassword) {
-    try {
-      const escapedPassword = validatedSudoPassword
-        .replace(/'/g, "'\\''")
-        .replace(/\$/g, "\\$")
-        .replace(/`/g, "\\`");
-      const testCommand = `echo '${escapedPassword}' | sudo -S -v 2>&1`;
-
-      try {
-        const { stderr } = await execAsync(testCommand, {
-          timeout: 5000,
-          maxBuffer: 1024,
-        });
-
-        // Check if sudo succeeded
-        if (stderr && stderr.includes("Sorry, try again")) {
-          // Password invalid, clear it
-          validatedSudoPassword = null;
-          await deleteSudoPasswordFromKeychain();
-          return false;
-        }
-
-        // Password is still valid
-        return true;
-      } catch (error) {
-        // Password might be invalid or expired
-        if (error.stderr && error.stderr.includes("Sorry, try again")) {
-          validatedSudoPassword = null;
-          await deleteSudoPasswordFromKeychain();
-          return false;
-        }
-        // Other errors, assume password is still valid
-        return true;
-      }
-    } catch (error) {
-      console.error("Error validating password:", error);
-      return false;
-    }
-  }
-
-  return false;
 });
 
 // Check if OpenVPN is installed
@@ -2119,6 +1844,20 @@ ipcMain.handle("check-openvpn-installed", async () => {
       installationGuide: installationGuide,
     };
   }
+});
+
+// Install OpenVPN (macOS via Homebrew as the user; elsewhere the guide)
+ipcMain.handle("install-openvpn", async (event) => {
+  if (!isMacOS()) {
+    const platform = getPlatformName();
+    return {
+      success: false,
+      needsManualInstall: true,
+      guide: getInstallationGuide(platform),
+    };
+  }
+  const win = BrowserWindow.fromWebContents(event.sender);
+  return await installOpenVpnViaBrew(win);
 });
 
 // Store running OpenVPN processes (key: serverId, value: process info)
@@ -2209,46 +1948,10 @@ const flushDns = async () => {
       // However, we attempt it. If we are already admin, it works.
       await execAsync("ipconfig /flushdns");
       logToFile("INFO", "DNS cache flushed (Windows).");
-    } else if (isMacOS()) {
-      if (validatedSudoPassword) {
-        const escapedPassword = validatedSudoPassword
-          .replace(/'/g, "'\\''")
-          .replace(/\$/g, "\\$")
-          .replace(/`/g, "\\`");
-        // macOS: dscacheutil -flushcache; sudo killall -HUP mDNSResponder
-        // Use sh -c to run both in one sudo session
-        const cmd = `echo '${escapedPassword}' | sudo -S sh -c 'dscacheutil -flushcache; killall -HUP mDNSResponder'`;
-        await execAsync(cmd);
-        logToFile("INFO", "DNS cache flushed (macOS).");
-      } else {
-        logToFile("WARN", "Skipping DNS flush: No sudo password available.");
-      }
     } else {
-      // Linux: resolvectl is common for systemd-resolved
-      if (validatedSudoPassword) {
-        const escapedPassword = validatedSudoPassword
-          .replace(/'/g, "'\\''")
-          .replace(/\$/g, "\\$")
-          .replace(/`/g, "\\`");
-        const cmd = `echo '${escapedPassword}' | sudo -S resolvectl flush-caches`;
-        try {
-          await execAsync(cmd);
-          logToFile("INFO", "DNS cache flushed (Linux - resolvectl).");
-        } catch (e) {
-          // Fallback or ignore if resolvectl not present
-          logToFile(
-            "WARN",
-            "Failed to flush DNS with resolvectl, trying systemd-resolve...",
-          );
-          try {
-            const cmd2 = `echo '${escapedPassword}' | sudo -S systemd-resolve --flush-caches`;
-            await execAsync(cmd2);
-            logToFile("INFO", "DNS cache flushed (Linux - systemd-resolve).");
-          } catch (ex) {
-            logToFile("ERROR", "Failed to flush DNS on Linux.");
-          }
-        }
-      }
+      // macOS: dscacheutil + mDNSResponder; Linux: resolvectl or systemd-resolve
+      await runHelper(["flush-dns"]);
+      logToFile("INFO", "DNS cache flushed.");
     }
   } catch (error) {
     logToFile("ERROR", "Failed to flush DNS:", error.message);
@@ -2263,50 +1966,18 @@ const connectVpn = async (data) => {
       return { success: false, error: "VPN file not found" };
     }
 
-    // Ensure sudo password is available and valid (only for Linux/macOS)
+    // Linux/macOS: make sure the privileged helper is installed and allowed
+    // (one admin prompt if it is not)
     if (!isWindows()) {
-      if (!validatedSudoPassword) {
-        // Try to load from keychain
-        const loaded = await loadSudoPasswordFromKeychain();
-        if (!loaded) {
-          return {
-            success: false,
-            error: "Sudo password not available. Please enter password first.",
-          };
-        }
-      }
-
-      // Validate password is still valid by refreshing sudo timestamp
-      try {
-        const escapedPassword = validatedSudoPassword
-          .replace(/'/g, "'\\''")
-          .replace(/\$/g, "\\$")
-          .replace(/`/g, "\\`");
-        const validateCommand = `echo '${escapedPassword}' | sudo -S -v 2>&1`;
-        const { stderr } = await execAsync(validateCommand, {
-          timeout: 5000,
-          maxBuffer: 1024,
-        });
-
-        if (stderr && stderr.includes("Sorry, try again")) {
-          // Password expired or invalid, clear it
-          validatedSudoPassword = null;
-          await deleteSudoPasswordFromKeychain();
-          return {
-            success: false,
-            error: "Sudo password expired. Please enter password again.",
-          };
-        }
-      } catch (error) {
-        if (error.stderr && error.stderr.includes("Sorry, try again")) {
-          validatedSudoPassword = null;
-          await deleteSudoPasswordFromKeychain();
-          return {
-            success: false,
-            error: "Sudo password expired. Please enter password again.",
-          };
-        }
-        // Continue if other error (might be network issue, etc)
+      const helper = await ensurePrivilegedHelper();
+      if (!helper.ok) {
+        logToFile("WARN", "Helper not ready:", helper.error || helper.reason);
+        return {
+          success: false,
+          error: helper.manualCommand
+            ? `${privileged.SETUP_INCOMPLETE_ERROR} ${helper.error}`
+            : privileged.SETUP_INCOMPLETE_ERROR,
+        };
       }
     }
 
@@ -2559,15 +2230,12 @@ const connectVpn = async (data) => {
     let command;
     let envPath;
 
-    // Linux/macOS: use sudo
-    const escapedPassword = validatedSudoPassword
-      .replace(/'/g, "'\\''")
-      .replace(/\$/g, "\\$")
-      .replace(/`/g, "\\`");
+    // Linux/macOS: the helper checks the files, finds OpenVPN itself and
+    // starts it with --script-security 1
     envPath =
       process.env.PATH ||
       "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin";
-    command = `echo '${escapedPassword}' | sudo -S '${escapedOpenvpnPath}' --config '${escapedFilePath}' --auth-user-pass '${escapedAuthFile}'`;
+    command = `sudo -n '${escapedHelperPath}' connect '${escapedFilePath}' '${escapedAuthFile}'`;
 
     logToFile("INFO", "Executing OpenVPN command...");
     // ... logging ...
@@ -2841,59 +2509,15 @@ const disconnectVpn = async (serverId) => {
         }
       }
     } else {
-      // Linux/macOS: use pkill with sudo if needed
-
-      // Ensure sudo password is loaded for disconnect
-      if (!validatedSudoPassword) {
-        try {
-          await loadSudoPasswordFromKeychain();
-        } catch (e) { }
-      }
-
-      const escapedPassword = validatedSudoPassword
-        ? validatedSudoPassword
-          .replace(/'/g, "'\\''")
-          .replace(/\$/g, "\\$")
-          .replace(/`/g, "\\`")
-        : "";
-
+      // Linux/macOS: the helper stops only the OpenVPN it started
       if (serverId) {
         // Disconnect specific server
         const processInfo = openvpnProcesses.get(serverId);
         if (processInfo) {
-          // Kill specific OpenVPN process by file path
-          const escapedFilePath = processInfo.filePath.replace(/'/g, "'\\''");
-
-          let killSuccess = false;
-
-          // First try to kill by PID if available (more reliable if we have it)
-          // But our openvpnProcess.pid is likely the sudo process wrapper.
-          // In 'connectVpn', we spawn: `echo ... | sudo -S openvpn ...`
-          // The PID is the SHELL.
-          // Killing the shell usually does NOT kill the sudo process or openvpn.
-          // So we MUST use pkill/pkill.
-
-          // Try pkill with sudo
-          if (escapedPassword) {
-            try {
-              await execAsync(
-                `echo '${escapedPassword}' | sudo -S pkill -f "openvpn.*${escapedFilePath}"`,
-                { timeout: 5000 },
-              );
-              killSuccess = true;
-            } catch (e) {
-              console.error("Failed to pkill:", e.message);
-            }
-          } else {
-            // If no password, try current user pkill (might work if we own the process, but unlikely if started with sudo)
-            try {
-              await execAsync(`pkill -f "openvpn.*${escapedFilePath}"`, {
-                timeout: 5000,
-              });
-              killSuccess = true;
-            } catch (e) {
-              console.error("Failed to pkill (no sudopass):", e.message);
-            }
+          try {
+            await runHelper(["disconnect", processInfo.filePath]);
+          } catch (e) {
+            logToFile("ERROR", "Helper disconnect failed:", e.stderr || e.message);
           }
 
           // Removes from openvpnProcesses, cleans temp auth file, notifies
@@ -2907,13 +2531,10 @@ const disconnectVpn = async (serverId) => {
       } else {
         // Disconnect all VPNs
         if (openvpnProcesses.size > 0) {
-          if (escapedPassword) {
-            await execAsync(
-              `echo '${escapedPassword}' | sudo -S pkill -f openvpn`,
-              { timeout: 5000 },
-            );
-          } else {
-            await execAsync("pkill -f openvpn", { timeout: 5000 });
+          try {
+            await runHelper(["disconnect-all"]);
+          } catch (e) {
+            logToFile("ERROR", "Helper disconnect-all failed:", e.stderr || e.message);
           }
 
           // Removes each from openvpnProcesses, cleans temp auth files,

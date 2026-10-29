@@ -22,13 +22,12 @@
     "build:win": "npm run build && electron-builder --win",
     "build:linux": "npm run build && electron-builder --linux",
     "build:all": "npm run build && electron-builder --mac --win --linux",
-    "release": "npm run build && electron-builder --mac --win --publish always",
+    "release": "scripts/release.sh",
     "postinstall": "electron-builder install-app-deps && electron-rebuild -f -w keytar"
   },
   "dependencies": {
     "electron-log": "^5.4.3",
     "electron-settings": "^4.0.4",
-    "electron-updater": "^6.6.2",
     "keytar": "^7.9.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
@@ -93,11 +92,13 @@
       "category": "public.app-category.networking",
       "target": [
         { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] },
         { "target": "pkg", "arch": ["x64", "arm64"] }
       ],
       "icon": "icons/mac/icon.icns",
       "hardenedRuntime": true,
-      "gatekeeperAssess": false
+      "gatekeeperAssess": false,
+      "artifactName": "RCP-Network-${version}-${arch}.${ext}"
     },
     "pkg": {
       "installLocation": "/Applications",
@@ -118,20 +119,15 @@
         "AppImage"
       ],
       "category": "Network",
-      "icon": "icons/png/512x512.png"
+      "icon": "icons/png/512x512.png",
+      "artifactName": "RCP-Network-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
-    },
-    "publish": [
-      {
-        "provider": "github",
-        "owner": "ilham-fauzi",
-        "repo": "rcp-network"
-      }
-    ]
+      "createStartMenuShortcut": true,
+      "artifactName": "RCP-Network-Setup-${version}.${ext}"
+    }
   }
 }

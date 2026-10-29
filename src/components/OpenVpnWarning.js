@@ -1,7 +1,32 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 
-const OpenVpnWarning = ({ isVisible, platform, installationGuide, onCheckAgain }) => {
+const OpenVpnWarning = ({ isVisible, platform, installationGuide, onCheckAgain, onInstall }) => {
+  const [installing, setInstalling] = useState(false);
+  const [installMessage, setInstallMessage] = useState(null);
+
+  useEffect(() => {
+    if (!installing || !window.electronAPI || !window.electronAPI.onInstallProgress) return;
+    return window.electronAPI.onInstallProgress((progress) => {
+      if (progress && progress.message) setInstallMessage(progress.message);
+    });
+  }, [installing]);
+
   if (!isVisible) return null;
+
+  const handleInstall = async () => {
+    setInstalling(true);
+    setInstallMessage('Installing OpenVPN...');
+    try {
+      const result = await onInstall();
+      if (result && !result.success) {
+        setInstallMessage(result.error || 'Installation failed. Please use the download guide.');
+      }
+    } catch (error) {
+      setInstallMessage(error.message || 'Installation failed. Please use the download guide.');
+    } finally {
+      setInstalling(false);
+    }
+  };
 
   const platformName = platform || 'your system';
   const guideUrl = installationGuide || 'https://openvpn.net/community-downloads/';
@@ -31,8 +56,18 @@ const OpenVpnWarning = ({ isVisible, platform, installationGuide, onCheckAgain }
             <p>
               OpenVPN is required to use this application. Please install OpenVPN on {platformName} to continue.
             </p>
+            {installMessage && <p className="mt-2">{installMessage}</p>}
           </div>
           <div className="mt-4 flex gap-3">
+            {onInstall && (
+              <button
+                onClick={handleInstall}
+                disabled={installing}
+                className="inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-yellow-800 bg-yellow-200 hover:bg-yellow-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500 transition-colors disabled:opacity-50"
+              >
+                {installing ? 'Installing...' : 'Install'}
+              </button>
+            )}
             <a
               href={guideUrl}
               target="_blank"

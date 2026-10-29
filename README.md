@@ -249,22 +249,26 @@ rcp_network/
 - **Linux/macOS**: The admin password is asked **once**, the first time the app starts, through the system's own dialog:
   - **macOS**: the macOS administrator prompt (`osascript ... with administrator privileges`; Touch ID allowed)
   - **Linux**: a `pkexec` (polkit) prompt. If `pkexec` is missing, the app shows the one command to run in a terminal instead.
-- That prompt installs two things, both owned by root:
+- That prompt installs these, all owned by root:
   - the helper:
     - macOS: `/Library/PrivilegedHelperTools/rcp-network-helper`
     - Linux: `/usr/local/libexec/rcp-network/rcp-network-helper`
+  - macOS only: a private copy of OpenVPN, `/Library/PrivilegedHelperTools/rcp-network/` (`bin/openvpn` and the Homebrew libraries it needs in `lib/`, pointed at each other and re-signed). It is made from the Homebrew OpenVPN, so install that first (`brew install openvpn`). The copy does not depend on Homebrew afterwards: `brew upgrade openvpn` does not break it or ask for the password again.
   - a sudoers rule, `/etc/sudoers.d/rcp-network` (mode `0440`, checked with `visudo -c` before it is installed), that lets only the user who ran setup run only that helper without a password.
 - After setup every privileged action is `sudo -n <helper> <command>`: connect, disconnect, disconnect all, and DNS flush. The app no longer stores, reads or pipes your password; older versions' keychain item (`rcp-network_sudo_password`) is deleted on first start.
-- At each launch and each connect the app runs `sudo -n <helper> --version`. If the helper or rule is missing (for example removed by a macOS update) or is older than the app's helper version, setup is offered again with one prompt. App updates that do not change the helper never ask again.
+- At each launch and each connect the app runs `sudo -n <helper> --version`. If the helper or rule is missing (for example removed by a macOS update), is older than the app's helper version, or (macOS) the private OpenVPN copy is missing or does not run, setup is offered again with one prompt. App updates that do not change the helper never ask again.
 - The helper only starts OpenVPN:
   - for a config file directly inside your `~/.rcp-network` (real path, symlinks resolved);
-  - with an OpenVPN binary from a fixed list (`/opt/homebrew/sbin`, `/usr/local/sbin`, `/usr/sbin`, `/usr/local/bin`, `/usr/bin`);
+  - with an OpenVPN binary you cannot change: the binary, every library it loads outside `/usr/lib` and `/System`, and every folder above them must be owned by root and not writable by group or others, or the helper refuses to start it:
+    - macOS: only the private copy in `/Library/PrivilegedHelperTools/rcp-network/bin/openvpn`;
+    - Linux: the first binary from a fixed list (`/opt/homebrew/sbin`, `/usr/local/sbin`, `/usr/sbin`, `/usr/local/bin`, `/usr/bin`) that passes that check;
   - with `--script-security 1`, so configs cannot run scripts. Configs that use `plugin`, `up`, `down`, `route-up`, `route-pre-down`, `ipchange`, `learn-address`, `tls-verify`, `auth-user-pass-verify`, `client-connect`, `client-disconnect`, `config`, `cd`, `chroot`, `log`, `log-append`, `status`, `writepid`, `management`, `iproute` or `tls-crypt-v2-verify` are refused.
 - To remove the helper and rule:
 
   ```bash
   # macOS
   sudo rm /etc/sudoers.d/rcp-network /Library/PrivilegedHelperTools/rcp-network-helper
+  sudo rm -rf /Library/PrivilegedHelperTools/rcp-network
   # Linux
   sudo rm /etc/sudoers.d/rcp-network /usr/local/libexec/rcp-network/rcp-network-helper
   ```
@@ -318,6 +322,7 @@ rcp_network/
 
 - **No Stored Admin Password**: The admin password is entered only in the system's own dialog during one-time setup and is never stored by the app
 - **Narrow sudo Rule**: The sudoers rule allows only the root-owned helper, for only the user who ran setup
+- **Root-Owned OpenVPN**: The helper runs only an OpenVPN binary (and libraries) that is owned by root and not writable by the user
 - **Keychain Storage**: Saved VPN credentials are stored in the system keychain
 - **File Isolation**: All VPN files stored in dedicated directory (`~/.rcp-network`)
 - **Password Handling**: Passwords never stored in plain text files

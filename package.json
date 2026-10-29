@@ -83,6 +83,10 @@
       {
         "from": "electron/helper/rcp-network-helper",
         "to": "helper/rcp-network-helper"
+      },
+      {
+        "from": "electron/helper/bundle-openvpn",
+        "to": "helper/bundle-openvpn"
       }
     ],
     "mac": {

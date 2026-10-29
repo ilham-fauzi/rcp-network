@@ -45,6 +45,7 @@ const scriptFor = (platform) =>
     user: "alice",
     sourceHelper: "/Applications/RCP Network.app/Contents/Resources/helper/rcp-network-helper",
     helperPath: helperInstallPath(platform),
+    openvpnSource: "/opt/homebrew/sbin/openvpn",
   });
 
 for (const [platform, group] of [["darwin", "wheel"], ["linux", "root"]]) {
@@ -96,6 +97,18 @@ for (const [platform, group] of [["darwin", "wheel"], ["linux", "root"]]) {
     assert.strictEqual(r.status, 0, r.stderr);
   });
 }
+
+test("darwin: install script needs an absolute OpenVPN source to copy", () => {
+  const base = { platform: "darwin", user: "alice", sourceHelper: "/x", helperPath: helperInstallPath("darwin") };
+  assert.throws(() => buildInstallScript(base), /OpenVPN not found/);
+  assert.throws(() => buildInstallScript({ ...base, openvpnSource: "openvpn" }), /OpenVPN not found/);
+});
+
+test("linux: install script needs no OpenVPN source", () => {
+  assert.doesNotThrow(() =>
+    buildInstallScript({ platform: "linux", user: "alice", sourceHelper: "/x", helperPath: helperInstallPath("linux") }),
+  );
+});
 
 test("install script rejects a bad user", () => {
   assert.throws(() =>

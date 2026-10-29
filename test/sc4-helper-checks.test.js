@@ -5,24 +5,14 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const fixture = require("./openvpn-fixture");
 
-const HELPER = path.join(__dirname, "..", "electron", "helper", "rcp-network-helper");
+const { HELPER, FIXED_OPENVPN, isMac } = fixture;
 
-const FIXED_OPENVPN = [
-  "/opt/homebrew/sbin/openvpn",
-  "/usr/local/sbin/openvpn",
-  "/usr/sbin/openvpn",
-  "/usr/local/bin/openvpn",
-  "/usr/bin/openvpn",
-];
-const hasOpenVpn = FIXED_OPENVPN.some((p) => {
-  try {
-    fs.accessSync(p, fs.constants.X_OK);
-    return fs.statSync(p).isFile();
-  } catch (e) {
-    return false;
-  }
-});
+// The OpenVPN the helper may use: on macOS a fake private copy in a trusted
+// temporary folder, on Linux the fixed list.
+const openvpn = fixture.trustedOpenVpn();
+const noOpenVpn = openvpn.skip || false;
 
 const FORBIDDEN = [
   "plugin", "up", "down", "route-up", "route-pre-down", "ipchange",
@@ -36,6 +26,7 @@ const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
 const tempDirs = [];
 test.after(() => {
   for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
+  fixture.cleanup();
 });
 
 const setup = () => {
@@ -60,7 +51,7 @@ const GOOD = "client\ndev tun\nproto udp\nremote vpn.example.com 1194\ndhcp-opti
 const helper = (env, ...args) =>
   spawnSync("/bin/sh", [HELPER, "--dry-run", ...args], {
     encoding: "utf8",
-    env: { ...process.env, ...env },
+    env: { ...process.env, ...openvpn.env, ...env },
   });
 
 const skip = isRoot ? "test mode is ignored as root" : false;
@@ -71,7 +62,7 @@ test("--version prints an integer", () => {
   assert.match(r.stdout.trim(), /^\d+$/);
 });
 
-test("good config gives a command with --script-security 1 after --config", { skip: skip || (!hasOpenVpn && "no OpenVPN in the fixed locations") }, () => {
+test("good config gives a command with --script-security 1 after --config", { skip: skip || noOpenVpn }, () => {
   const t = setup();
   const config = writeConfig(t.dir, "good.ovpn", GOOD);
   const r = helper({ RCP_HELPER_TEST_HOME: t.home }, "connect", config, t.auth);
@@ -84,10 +75,11 @@ test("good config gives a command with --script-security 1 after --config", { sk
   assert.strictEqual(words[securityAt + 1], "1");
   assert.ok(words.includes("--auth-user-pass"));
   assert.ok(words.includes("--writepid"));
-  assert.ok(FIXED_OPENVPN.includes(words[0]), `unexpected OpenVPN path ${words[0]}`);
+  assert.strictEqual(words[0], openvpn.binary);
+  if (!isMac) assert.ok(FIXED_OPENVPN.includes(words[0]), `unexpected OpenVPN path ${words[0]}`);
 });
 
-test("OpenVPN comes only from the fixed list, never from PATH or the environment", { skip }, () => {
+test("OpenVPN comes only from the helper's own choice, never from PATH or the environment", { skip }, () => {
   const t = setup();
   const config = writeConfig(t.dir, "good.ovpn", GOOD);
   const fakeBin = path.join(t.outside, "bin");
@@ -99,9 +91,9 @@ test("OpenVPN comes only from the fixed list, never from PATH or the environment
     "connect", config, t.auth,
   );
   assert.ok(!r.stdout.includes(fake), "helper used an OpenVPN path it was given");
-  if (hasOpenVpn) {
+  if (!noOpenVpn) {
     assert.strictEqual(r.status, 0, r.stderr);
-    assert.ok(FIXED_OPENVPN.includes(r.stdout.trim().split(/\s+/)[0]));
+    assert.strictEqual(r.stdout.trim().split(/\s+/)[0], openvpn.binary);
   } else {
     assert.strictEqual(r.status, 2);
     assert.match(r.stderr, /^refused: /m);
@@ -175,7 +167,7 @@ for (const directive of FORBIDDEN) {
   }
 }
 
-test("accepts commented-out directives", { skip: skip || (!hasOpenVpn && "no OpenVPN in the fixed locations") }, () => {
+test("accepts commented-out directives", { skip: skip || noOpenVpn }, () => {
   const t = setup();
   const config = writeConfig(
     t.dir,
@@ -186,7 +178,7 @@ test("accepts commented-out directives", { skip: skip || (!hasOpenVpn && "no Ope
   assert.strictEqual(r.status, 0, r.stderr);
 });
 
-test("does not mistake longer directive names for forbidden ones", { skip: skip || (!hasOpenVpn && "no OpenVPN in the fixed locations") }, () => {
+test("does not mistake longer directive names for forbidden ones", { skip: skip || noOpenVpn }, () => {
   const t = setup();
   const config = writeConfig(t.dir, "longer.ovpn", `${GOOD}up-delay\nstatus-version 2\nroute-delay 2\n`);
   const r = helper({ RCP_HELPER_TEST_HOME: t.home }, "connect", config, t.auth);

@@ -8,7 +8,7 @@ const DOWNLOAD_PAGE = "https://github.com/ilham-fauzi/rcp-network/releases/lates
 // scripts/release.sh signs releases with. Print it with
 // `node scripts/update-key.js public`. scripts/release.sh refuses to run
 // while this placeholder is here.
-const PUBLIC_KEY = "TODO-REPLACE-WITH-update-key.js-public";
+const PUBLIC_KEY = "3K476VHSa/hDelgiGwoPJqSWyoHNm3HU/Dd6fgzlvTg=";
 
 const NO_INSTALLABLE_DOWNLOAD = "no installable download";
 

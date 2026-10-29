@@ -2384,16 +2384,14 @@ ipcMain.handle("get-app-version", () => {
 
 // OpenVPN processes still running, waiting up to 5 s for them to exit
 const countOpenvpnProcesses = async () => {
+  const command = isWindows() ? 'tasklist /FI "IMAGENAME eq openvpn.exe" /NH' : "pgrep -x openvpn";
   let count = 0;
   for (let i = 0; i < 10; i++) {
     try {
-      if (isWindows()) {
-        const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq openvpn.exe" /NH');
-        count = (stdout.match(/openvpn\.exe/gi) || []).length;
-      } else {
-        const { stdout } = await execAsync("pgrep -x openvpn");
-        count = stdout.trim().split("\n").filter(Boolean).length;
-      }
+      const { stdout } = await execAsync(command);
+      count = isWindows()
+        ? (stdout.match(/openvpn\.exe/gi) || []).length
+        : stdout.trim().split("\n").filter(Boolean).length;
     } catch (e) {
       // pgrep exits 1 when nothing matches
       count = 0;
@@ -2405,7 +2403,7 @@ const countOpenvpnProcesses = async () => {
 };
 
 // In-app updates: checked here, installed after quit by a detached helper.
-// The stored sudo password is never involved.
+// No admin password is involved.
 let updater = null;
 const getUpdater = () => {
   if (!updater) {

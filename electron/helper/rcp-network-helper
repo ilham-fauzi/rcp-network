@@ -12,19 +12,28 @@
 #   disconnect-all                stop every OpenVPN this helper started
 #   flush-dns                     flush the system DNS cache
 #
+# OpenVPN runs only from a binary the user cannot change: the binary, every
+# library it loads outside /usr/lib and /System, and every folder above them
+# must be owned by root and not writable by group or others. On macOS that is
+# only the private copy that setup makes in $MAC_BUNDLE_DIR.
+#
 # Every refusal exits 2 and prints "refused: <reason>" on stderr.
 #
 # POSIX sh on purpose: macOS ships bash 3.2 and Linux may have no bash.
 
-HELPER_VERSION=1
+HELPER_VERSION=2
 
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
+unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH DYLD_FALLBACK_LIBRARY_PATH
 umask 077
 
 FORBIDDEN_DIRECTIVES="plugin up down route-up route-pre-down ipchange learn-address tls-verify auth-user-pass-verify client-connect client-disconnect config cd chroot log log-append status writepid management iproute tls-crypt-v2-verify"
 
+# Linux only; macOS uses the private copy alone.
 OPENVPN_CANDIDATES="/opt/homebrew/sbin/openvpn /usr/local/sbin/openvpn /usr/sbin/openvpn /usr/local/bin/openvpn /usr/bin/openvpn"
+
+MAC_BUNDLE_DIR=/Library/PrivilegedHelperTools/rcp-network
 
 refuse() {
   echo "refused: $*" >&2
@@ -34,6 +43,18 @@ refuse() {
 OS=$(uname -s)
 RUN_UID=$(id -u)
 DRY_RUN=0
+
+# Test mode: only honoured when not root, so it opens no bypass.
+#   RCP_HELPER_TEST_TRUSTED_UID    also trusted as owner, next to uid 0
+#   RCP_HELPER_TEST_OPENVPN_BUNDLE replaces $MAC_BUNDLE_DIR on macOS
+TRUSTED_UID=0
+if [ "$RUN_UID" -ne 0 ]; then
+  case ${RCP_HELPER_TEST_TRUSTED_UID:-} in
+    ''|*[!0-9]*) ;;
+    *) TRUSTED_UID=$RCP_HELPER_TEST_TRUSTED_UID ;;
+  esac
+  [ -n "${RCP_HELPER_TEST_OPENVPN_BUNDLE:-}" ] && MAC_BUNDLE_DIR=$RCP_HELPER_TEST_OPENVPN_BUNDLE
+fi
 
 # --- whose files are allowed -------------------------------------------------
 
@@ -114,14 +135,121 @@ hash_id() {
   fi
 }
 
+# --- trusted OpenVPN ------------------------------------------------------------
+
+# Prints "<uid> <octal mode>" for $1 (not following a final symlink).
+owner_mode() {
+  if [ "$OS" = Darwin ]; then
+    stat -f '%u %Lp' "$1"
+  else
+    stat -c '%u %a' "$1"
+  fi
+}
+
+# Passes when the real path of $1 and every folder above it, up to /, are
+# owned by root and not writable by group or others.
+check_trusted() {
+  p=$(real_path "$1") || return 1
+  while :; do
+    set -- $(owner_mode "$p" 2>/dev/null)
+    [ $# -eq 2 ] || return 1
+    case $2 in
+      ''|*[!0-7]*) return 1 ;;
+    esac
+    [ "$1" = 0 ] || [ "$1" = "$TRUSTED_UID" ] || return 1
+    [ $(( 0$2 & 022 )) -eq 0 ] || return 1
+    [ "$p" = / ] && return 0
+    p=$(dirname "$p")
+  done
+}
+
+# Passes when every library $1 loads is a system library or is itself
+# trusted. On macOS a bundled library must be an @loader_path/../lib/ name
+# that resolves inside the binary's own bundle (<bundle>/bin/openvpn).
+check_libs() {
+  bin=$(real_path "$1") || return 1
+  if [ "$OS" = Darwin ]; then
+    bundle_lib=$(dirname "$(dirname "$bin")")/lib
+    todo=$bin
+    done_list=
+    while [ -n "$todo" ]; do
+      f=${todo%%"
+"*}
+      case $todo in
+        *"
+"*) todo=${todo#*"
+"} ;;
+        *) todo= ;;
+      esac
+      case "
+$done_list
+" in
+        *"
+$f
+"*) continue ;;
+      esac
+      done_list="$done_list
+$f"
+      libs=$(otool -L "$f" 2>/dev/null) || return 1
+      libs=$(printf '%s\n' "$libs" | awk '/^[ \t]/ { print $1 }')
+      [ -n "$libs" ] || return 1
+      for lib in $libs; do
+        case $lib in
+          /usr/lib/*|/System/*) ;;
+          @loader_path/../lib/*)
+            leaf=${lib#@loader_path/../lib/}
+            case $leaf in
+              ''|*/*) return 1 ;;
+            esac
+            r=$(real_path "$(dirname "$f")/../lib/$leaf") || return 1
+            [ "$(dirname "$r")" = "$(real_path "$bundle_lib")" ] || return 1
+            check_trusted "$r" || return 1
+            todo="$todo${todo:+
+}$r"
+            ;;
+          *) return 1 ;;
+        esac
+      done
+    done
+    return 0
+  fi
+  out=$(ldd "$bin" 2>/dev/null) || return 1
+  printf '%s\n' "$out" | grep -q 'not found' && return 1
+  for lib in $(printf '%s\n' "$out" | awk '
+    $2 == "=>" && $3 ~ /^\// { print $3; next }
+    $1 ~ /^\// { print $1 }'); do
+    check_trusted "$lib" || return 1
+  done
+  return 0
+}
+
+# The binary must be trusted before ldd or otool look into it.
+check_openvpn() {
+  [ -f "$1" ] && [ -x "$1" ] || return 1
+  check_trusted "$1" && check_libs "$1"
+}
+
+# Prints the OpenVPN to run. macOS: only the private copy. Linux: the first
+# entry of the fixed list that passes the checks.
 find_openvpn() {
+  if [ "$OS" = Darwin ]; then
+    c=$MAC_BUNDLE_DIR/bin/openvpn
+    [ -e "$c" ] || refuse "OpenVPN copy not found at $c; run setup again"
+    check_openvpn "$c" || refuse "untrusted openvpn $c"
+    printf '%s\n' "$c"
+    return 0
+  fi
+  untrusted=
   for c in $OPENVPN_CANDIDATES; do
-    if [ -f "$c" ] && [ -x "$c" ]; then
+    [ -f "$c" ] && [ -x "$c" ] || continue
+    if check_openvpn "$c"; then
       printf '%s\n' "$c"
       return 0
     fi
+    untrusted=${untrusted:-$c}
   done
-  return 1
+  [ -z "$untrusted" ] || refuse "untrusted openvpn $untrusted"
+  refuse "OpenVPN not found in the fixed locations"
 }
 
 owner_uid() {
@@ -236,7 +364,6 @@ cmd_connect() {
   resolve_user
   config=$(checked_file config "$1") || exit 2
   auth=$(checked_file "auth file" "$2") || exit 2
-  openvpn=$(find_openvpn) || refuse "OpenVPN not found in the fixed locations"
 
   prepare_pid_dir
   id=$(hash_id "$config")
@@ -254,6 +381,8 @@ cmd_connect() {
     remove_entry "$id"
     refuse "config uses forbidden directive '$bad'"
   fi
+
+  openvpn=$(find_openvpn) || { remove_entry "$id"; exit 2; }
 
   cd "$ALLOWED_DIR" || refuse "cannot enter ~/.rcp-network"
 
@@ -322,6 +451,17 @@ cmd_flush_dns() {
   exit 1
 }
 
+# Test-only commands: report the ownership and library checks.
+cmd_check() {
+  [ "$RUN_UID" -ne 0 ] || refuse "test command not available as root"
+  [ $# -eq 1 ] || refuse "usage: $cmd <path>"
+  case $cmd in
+    check-trusted) check_trusted "$1" ;;
+    check-libs) check_libs "$1" ;;
+  esac || refuse "untrusted $1"
+  exit 0
+}
+
 # --- main ---------------------------------------------------------------------
 
 if [ "${1:-}" = "--dry-run" ]; then
@@ -339,5 +479,6 @@ case $cmd in
   disconnect) cmd_disconnect "$@" ;;
   disconnect-all) cmd_disconnect_all "$@" ;;
   flush-dns) cmd_flush_dns "$@" ;;
+  check-trusted|check-libs) cmd_check "$@" ;;
   *) refuse "unknown command '$cmd'" ;;
 esac

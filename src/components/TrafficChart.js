@@ -28,51 +28,65 @@ const TrafficChart = ({ isConnected, downloadSpeed, uploadSpeed, onConnectClick,
   const intervalRef = useRef(null);
   const timeRef = useRef(0);
 
+  // Real-time Traffic Data Listener
+  useEffect(() => {
+    if (!window.electronAPI || !window.electronAPI.on) return;
+
+    const handleTraffic = (data) => {
+      setData((prevData) => {
+        // Ensure data is initialized
+        const currentData = prevData.length === 0 ? Array(30).fill({ time: 0, download: 0, upload: 0 }) : prevData;
+        
+        const nextTime = (currentData[currentData.length - 1].time + 5); // 5s increments
+        const newPoint = {
+          time: nextTime,
+          download: (data.download / 1024 / 1024).toFixed(2),
+          upload: (data.upload / 1024 / 1024).toFixed(2),
+        };
+        
+        const newData = [...currentData, newPoint];
+        return newData.slice(-30);
+      });
+    };
+
+    const unsubscribe = window.electronAPI.on('vpn-traffic', handleTraffic);
+    return () => {
+      if (unsubscribe && window.electronAPI.removeListener) {
+        window.electronAPI.removeListener('vpn-traffic', unsubscribe);
+      }
+    };
+  }, []);
+
+  // Clear chart data only if effectively disconnected
+  useEffect(() => {
+    if (!isConnected) {
+      setData(Array(30).fill({ time: 0, download: 0, upload: 0 }));
+      timeRef.current = 0;
+    }
+  }, [isConnected]);
+
   useEffect(() => {
     if (isConnected && startTime) {
-      const timer = setInterval(() => {
+      if (!window.electronAPI || !window.electronAPI.on) return;
+
+      const handleTick = () => {
         setDuration(Date.now() - startTime);
-      }, 1000);
+      };
+
       setDuration(Date.now() - startTime); // Initial set
-      return () => clearInterval(timer);
+      const unsubscribe = window.electronAPI.on('vpn-tick', handleTick);
+      
+      return () => {
+        if (unsubscribe && window.electronAPI.removeListener) {
+          window.electronAPI.removeListener('vpn-tick', unsubscribe);
+        }
+      };
     } else {
       setDuration(0);
     }
   }, [isConnected, startTime]);
 
   useEffect(() => {
-    if (isConnected) {
-      // Initialize with start data immediately so chart renders instantly
-      if (timeRef.current === 0) {
-          setData([{ time: 0, download: 0, upload: 0, timeLabel: '0s' }]);
-      }
-
-      // Start collecting data
-      intervalRef.current = setInterval(() => {
-        timeRef.current += 1;
-        setData((prevData) => {
-          const newData = [
-            ...prevData,
-            {
-              time: timeRef.current,
-              download: downloadSpeed,
-              upload: uploadSpeed,
-              timeLabel: timeRef.current <= 6 ? `${timeRef.current}s` : `${timeRef.current}s`
-            }
-          ];
-          // Keep only last 90 seconds of data
-          return newData.slice(-90);
-        });
-      }, 1000);
-    } else {
-      // Clear data when disconnected
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-      setData([]);
-      timeRef.current = 0;
-    }
 
     return () => {
       if (intervalRef.current) {

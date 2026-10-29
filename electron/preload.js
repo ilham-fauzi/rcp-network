@@ -35,6 +35,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Timer Preference
   getTimerPreference: () => ipcRenderer.invoke('get-timer-preference'),
   setTimerPreference: (value) => ipcRenderer.invoke('set-timer-preference', value),
+  // New: Event-driven API (Push-based)
+  on: (channel, callback) => {
+    const validChannels = [
+      'vpn-traffic',
+      'preference-changed',
+      'vpn-connected',
+      'vpn-disconnected',
+      'awake-status-change',
+      'vpn-log',
+      'vpn-tick'
+    ];
+    if (validChannels.includes(channel)) {
+      const subscription = (event, ...args) => callback(...args);
+      ipcRenderer.on(channel, subscription);
+      return subscription; // Return context for removal
+    }
+  },
+  removeListener: (channel, subscription) => {
+    ipcRenderer.removeListener(channel, subscription);
+  },
   onInstallProgress: (callback) => {
     const subscription = (event, progress) => callback(progress);
     ipcRenderer.on('install-progress', subscription);

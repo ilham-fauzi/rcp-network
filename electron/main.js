@@ -21,6 +21,8 @@ const execAsync = util.promisify(exec);
 const keytar = require("keytar");
 const si = require("systeminformation");
 const isDev = process.env.ELECTRON_IS_DEV === "1";
+const { EventEmitter } = require('events');
+const appEvents = new EventEmitter();
 
 // Platform detection helpers
 const isWindows = () => process.platform === "win32";
@@ -30,78 +32,112 @@ const isMacOS = () => process.platform === "darwin";
 // autoUpdater will be configured after app is ready
 let autoUpdater = null;
 
-// Global Traffic Monitor
-let trafficInterval = null;
+// Global App Heartbeat and Traffic Monitor
+let heartbeatInterval = null;
+let heartbeatTick = 0;
 let lastRx = 0;
 let lastTx = 0;
-let lastCheckTime = 0;
 
-function startTrafficMonitor() {
-  if (trafficInterval) return;
+function startAppHeartbeat() {
+  if (heartbeatInterval) return;
 
-  // Reset counters
-  lastRx = 0;
-  lastTx = 0;
-  lastCheckTime = Date.now();
-
-  trafficInterval = setInterval(async () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    if (openvpnProcesses.size === 0) {
-      stopTrafficMonitor();
-      return;
+  heartbeatInterval = setInterval(async () => {
+    heartbeatTick++;
+    
+    // 1. UI Tick (1s)
+    appEvents.emit('tick', { timestamp: Date.now() });
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("vpn-tick", { timestamp: Date.now() });
     }
 
-    try {
-      const stats = await si.networkStats();
-      const now = Date.now();
-      const timeDiff = (now - lastCheckTime) / 1000; // seconds
+    // 2. Process Monitoring & Log Tailing (Every 2s)
+    if (heartbeatTick % 2 === 0) {
+      for (const [serverId, procInfo] of openvpnProcesses) {
+        // Monitor process existence for Windows Elevated (where we don't have a child_process handle)
+        if (procInfo.isElevated && procInfo.pid) {
+          try {
+            process.kill(procInfo.pid, 0); // Check if PID exists
+          } catch (e) {
+            // Process probably exited (ESRCH)
+            console.log(`Process ${procInfo.pid} for ${serverId} exited.`);
+            handleVpnExit(serverId, "Process exited (Monitored)");
+            continue;
+          }
+        }
 
-      if (timeDiff <= 0) return;
-      if (timeDiff > 10) {
-        // If huge jump (e.g. sleep), reset
-        lastCheckTime = now;
-        lastRx = 0; // Will skip one frame effectively
-        lastTx = 0;
-        return;
-      }
-
-      // Sum all non-internal traffic
-      let currentRx = 0;
-      let currentTx = 0;
-
-      stats.forEach((s) => {
-        if (s.internal) return;
-        currentRx += s.rx_bytes;
-        currentTx += s.tx_bytes;
-      });
-
-      if (lastRx > 0 && lastTx > 0) {
-        const rxSpeed = Math.max(0, (currentRx - lastRx) / timeDiff); // bytes/sec
-        const txSpeed = Math.max(0, (currentTx - lastTx) / timeDiff);
-
-        // Only send if we have meaningful numbers (sometimes counters reset)
-        if (rxSpeed < 1e9 && txSpeed < 1e9) {
-          // Sanity check 1GB/s
-          mainWindow.webContents.send("vpn-traffic", {
-            download: rxSpeed,
-            upload: txSpeed,
-          });
+        // Tail logs if path exists (Windows Elevated fallback)
+        if (procInfo.logPath && fs.existsSync(procInfo.logPath)) {
+          const stats = fs.statSync(procInfo.logPath);
+          if (stats.size > (procInfo.lastLogSize || 0)) {
+            const lastSize = procInfo.lastLogSize || 0;
+            const stream = fs.createReadStream(procInfo.logPath, {
+              start: lastSize,
+              end: stats.size,
+            });
+            stream.on("data", (chunk) => {
+              const message = chunk.toString();
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send("vpn-log", { serverId, message });
+              }
+            });
+            procInfo.lastLogSize = stats.size;
+          }
         }
       }
+    }
 
-      lastRx = currentRx;
-      lastTx = currentTx;
-      lastCheckTime = now;
-    } catch (e) {
-      console.error("Traffic monitor error:", e);
+    // 3. Traffic Monitor (Every 5s)
+    if (heartbeatTick % 5 === 0) {
+      if (openvpnProcesses.size === 0) {
+        // Skip
+      } else {
+        try {
+          const stats = await si.networkStats();
+          if (stats && stats.length > 0) {
+            const active = stats.find(s => s.operstate === 'up' && s.iface !== 'lo') || stats[0];
+            const data = {
+              download: active.rx_sec || 0,
+              upload: active.tx_sec || 0,
+              totalDownload: active.rx_bytes || 0,
+              totalUpload: active.tx_bytes || 0,
+              timestamp: Date.now()
+            };
+            appEvents.emit('traffic-update', data);
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send("vpn-traffic", data);
+            }
+          }
+        } catch (error) {
+          console.error("Traffic monitor error:", error);
+        }
+      }
+    }
+
+    if ((!mainWindow || mainWindow.isDestroyed()) && openvpnProcesses.size === 0) {
+      stopAppHeartbeat();
     }
   }, 1000);
 }
 
-function stopTrafficMonitor() {
-  if (trafficInterval) {
-    clearInterval(trafficInterval);
-    trafficInterval = null;
+function handleVpnExit(serverId, reason) {
+  if (openvpnProcesses.has(serverId)) {
+    const procInfo = openvpnProcesses.get(serverId);
+    openvpnProcesses.delete(serverId);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("vpn-disconnected", { serverId, reason });
+    }
+    if (procInfo.tempAuthFile) {
+        try { fs.unlinkSync(procInfo.tempAuthFile); } catch (e) { }
+    }
+    updateTrayMenu();
+  }
+}
+
+function stopAppHeartbeat() {
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
+    heartbeatTick = 0;
   }
 }
 
@@ -119,19 +155,26 @@ const VPN_CRED_SERVICE = `${APP_NAME}_vpn_credentials`;
 const PREFS_FILE = path.join(VPN_DIRECTORY, "preferences.json");
 
 // Load preferences from disk
+let cachedPreferences = null;
+
 const loadPreferences = () => {
+  if (cachedPreferences !== null) return cachedPreferences;
   try {
     if (fs.existsSync(PREFS_FILE)) {
-      return JSON.parse(fs.readFileSync(PREFS_FILE, "utf-8"));
+      cachedPreferences = JSON.parse(fs.readFileSync(PREFS_FILE, "utf-8"));
+    } else {
+      cachedPreferences = {};
     }
   } catch (e) {
     console.error("Error loading preferences:", e);
+    cachedPreferences = {};
   }
-  return {};
+  return cachedPreferences;
 };
 
 // Save preferences to disk
 const savePreferences = (prefs) => {
+  cachedPreferences = prefs;
   try {
     fs.writeFileSync(PREFS_FILE, JSON.stringify(prefs, null, 2), "utf-8");
   } catch (e) {
@@ -150,6 +193,14 @@ const setPreference = (key, value) => {
   const prefs = loadPreferences();
   prefs[key] = value;
   savePreferences(prefs);
+  
+  // Emit preference change event
+  appEvents.emit('preference-changed', { key, value });
+  
+  // Notify renderer
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('preference-changed', { key, value });
+  }
 };
 
 // Setup logging to file (use VPN_DIRECTORY for logs)
@@ -544,28 +595,77 @@ function createTray() {
   tray = new Tray(icon);
   tray.setToolTip("RCP Network");
 
-  // Update tray tooltip with timer info if enabled
   const updateTrayTooltip = () => {
     if (!tray) return;
-    const showTimer = getPreference("showDurationTimer", true);
-    if (showTimer && openvpnProcesses.size > 0) {
-      const connections = [];
+    const connectedCount = openvpnProcesses.size;
+    let tooltip = `RCP Network\nStatus: ${
+      connectedCount > 0 ? connectedCount + " Connected" : "Disconnected"
+    }`;
+    tray.setToolTip(tooltip);
+  };
+
+  // Initial tray tooltip
+  updateTrayTooltip();
+
+  // Update traffic display and duration in tray via Heartbeat
+  const updateTrayUI = (trafficData) => {
+    if (!tray) return;
+
+    const connectedCount = openvpnProcesses.size;
+    const download = trafficData ? (trafficData.download / 1024 / 1024).toFixed(2) : "0.00";
+    const upload = trafficData ? (trafficData.upload / 1024 / 1024).toFixed(2) : "0.00";
+    
+    // 1. Update Tooltip (Always update duration on every tick if any connected)
+    let tooltip = `RCP Network - ${connectedCount} Active\n`;
+    tooltip += `↓ ${download} MB/s | ↑ ${upload} MB/s`;
+    
+    if (connectedCount > 0) {
+      const lines = [];
+      const now = Date.now();
       for (const [serverId, procInfo] of openvpnProcesses) {
-        const elapsed = procInfo.startTime ? Math.floor((Date.now() - procInfo.startTime) / 1000) : 0;
+        const elapsed = procInfo.startTime ? Math.floor((now - procInfo.startTime) / 1000) : 0;
         const h = Math.floor(elapsed / 3600);
         const m = Math.floor((elapsed % 3600) / 60);
         const s = elapsed % 60;
         const time = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-        connections.push(`${serverId.replace('.ovpn', '')}: ${time}`);
+        lines.push(`${serverId.replace('.ovpn', '')}: ${time}`);
       }
-      tray.setToolTip(`RCP Network\n${connections.join('\n')}`);
+      tooltip += `\n${lines.join('\n')}`;
+      
+      // 2. Update Tray Title (MacOS only)
+      const showTimer = getPreference("showDurationTimer", true);
+      if (showTimer) {
+        // Use the first active connection for the title timer
+        const [firstProcInfo] = Array.from(openvpnProcesses.values());
+        const elapsed = firstProcInfo.startTime ? Math.floor((now - firstProcInfo.startTime) / 1000) : 0;
+        const h = Math.floor(elapsed / 3600);
+        const m = Math.floor((elapsed % 3600) / 60);
+        const s = elapsed % 60;
+        const timeString = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+        
+        if (isMacOS()) tray.setTitle(timeString);
+      } else if (isMacOS()) {
+        tray.setTitle("");
+      }
     } else {
-      tray.setToolTip("RCP Network");
+      if (isMacOS()) tray.setTitle("");
     }
+    
+    tray.setToolTip(tooltip);
   };
 
-  // Periodically update tooltip
-  setInterval(updateTrayTooltip, 5000);
+  let lastTrafficData = null;
+  appEvents.on('traffic-update', (data) => {
+    lastTrafficData = data;
+    updateTrayUI(data);
+  });
+
+  appEvents.on('tick', () => {
+    // Only update UI if we have active connections (for duration timers)
+    if (openvpnProcesses.size > 0) {
+      updateTrayUI(lastTrafficData);
+    }
+  });
 
   updateTrayMenu();
 }
@@ -799,8 +899,7 @@ function updateTrayMenu() {
 }
 
 // Handle Connect from Tray
-// Keep track of duration interval separately from disconnect timers
-let durationIntervals = new Map();
+// Tickers are now handled centrally via startAppHeartbeat
 
 async function handleTrayConnect(serverId, filename, duration = null) {
   // If already connected, do nothing (or show error)
@@ -1614,6 +1713,9 @@ const processOvpnFile = (filePath) => {
     const configsToRemove = [
       "client-cert-not-required",
       "verify-client-cert none",
+      // Deprecated since OpenVPN 2.4+ (compression oracle attack risk) and can
+      // fail negotiation silently against newer servers
+      "compress lzo",
     ];
 
     // Split into lines
@@ -1645,6 +1747,17 @@ const processOvpnFile = (filePath) => {
 
     // Join lines back
     content = processedLines.join("\n");
+
+    // Prevent this tunnel from claiming the OS default gateway. Most .ovpn
+    // configs push `redirect-gateway def1` from the server; with 2+ profiles
+    // connected simultaneously they fight over the default route, causing
+    // traffic to exit via the wrong tunnel (seen as spurious 503s from the
+    // destination server). Ignoring the pushed option keeps server-specific
+    // routes intact while avoiding the default-route conflict.
+    if (!/^\s*pull-filter\s+ignore\s+["']redirect-gateway["']/im.test(content)) {
+      content = content.replace(/\n*$/, "\n") + 'pull-filter ignore "redirect-gateway"\n';
+      modified = true;
+    }
 
     // Write processed content back to file if modified
     if (modified) {
@@ -2320,72 +2433,24 @@ const connectVpn = async (data) => {
               startTime: Date.now(),
             });
 
-            // Start Duration Ticker
-            // Only supports showing one active duration in Tray Title (MacOS constraint usually)
-            // If multiple are connected, we might need a strategy. For now, last connected wins or just the single one.
-            if (tray) {
-              const startTime = Date.now();
-              const ticker = setInterval(() => {
-                const showTimer = getPreference("showDurationTimer", true);
-                if (!showTimer) {
-                  if (isMacOS()) tray.setTitle("");
-                  return;
-                }
-                const diff = Date.now() - startTime;
-                const seconds = Math.floor((diff / 1000) % 60);
-                const minutes = Math.floor((diff / (1000 * 60)) % 60);
-                const hours = Math.floor(diff / (1000 * 60 * 60));
-
-                const timeString = `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
-
-                if (isMacOS()) {
-                  tray.setTitle(timeString);
-                } else {
-                  tray.setToolTip(`RCP Network: ${timeString}`);
-                }
-              }, 1000);
-              durationIntervals.set(serverId, ticker);
-            }
-
             openvpnProcess.on("exit", (code, signal) => {
-              if (openvpnProcesses.has(serverId)) {
-                openvpnProcesses.delete(serverId);
-                // Clear tickers
-                if (durationIntervals.has(serverId)) {
-                  clearInterval(durationIntervals.get(serverId));
-                  durationIntervals.delete(serverId);
-                  durationIntervals.delete(serverId);
-                  if (tray && durationIntervals.size === 0) tray.setTitle("");
-                }
-                if (mainWindow && !mainWindow.isDestroyed()) {
-                  mainWindow.webContents.send("vpn-disconnected", {
-                    serverId,
-                    reason: `Process exited with code ${code}`,
-                  });
-                }
-                try {
-                  fs.unlinkSync(tempAuthFile);
-                } catch (e) { }
-                updateTrayMenu(); // Update tray on exit
-              }
+              console.log(`OpenVPN process exited with code ${code}`);
+              handleVpnExit(serverId, `Process exited with code ${code}`);
             });
           }
+
+          // Emit connected event
+          const startTime = Date.now();
+          appEvents.emit('vpn-connected', { serverId, startTime });
 
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send("vpn-connected", {
               serverId,
-              startTime: Date.now(),
+              startTime,
             });
           }
 
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send("vpn-connected", {
-              serverId,
-              startTime: Date.now(),
-            });
-          }
-
-          startTrafficMonitor();
+          startAppHeartbeat();
           flushDns().then(() => {
             resolve({
               success: true,
@@ -2439,95 +2504,19 @@ const connectVpn = async (data) => {
 
           console.log("OpenVPN process started with PID (elevated):", pid);
 
-          // Log tailing and monitoring
-          let lastSize = 0;
-          const logPoller = setInterval(() => {
-            try {
-              if (fs.existsSync(logPath)) {
-                const stats = fs.statSync(logPath);
-                if (stats.size > lastSize) {
-                  const stream = fs.createReadStream(logPath, {
-                    start: lastSize,
-                    end: stats.size,
-                  });
-                  stream.on("data", (chunk) => {
-                    const message = chunk.toString();
-                    console.log("OpenVPN stdout:", message);
-                    if (serverId && mainWindow && !mainWindow.isDestroyed()) {
-                      mainWindow.webContents.send("vpn-log", {
-                        serverId,
-                        message,
-                      });
-                    }
-                  });
-                  lastSize = stats.size;
-                }
-              }
-            } catch (e) { }
-          }, 500);
-
-          // Monitor exit
-          const exitMonitor = setInterval(async () => {
-            try {
-              const { stdout } = await execAsync(
-                `tasklist /FI "PID eq ${pid}" /NH`,
-              );
-              if (!stdout.includes(pid.toString())) {
-                clearInterval(exitMonitor);
-                clearInterval(logPoller);
-                if (serverId && openvpnProcesses.has(serverId)) {
-                  openvpnProcesses.delete(serverId);
-                  if (mainWindow && !mainWindow.isDestroyed()) {
-                    mainWindow.webContents.send("vpn-disconnected", {
-                      serverId,
-                      reason: "Elevated process exited",
-                    });
-                  }
-                  try {
-                    fs.unlinkSync(tempAuthFile);
-                  } catch (e) { }
-                  updateTrayMenu();
-                }
-              }
-            } catch (e) { }
-          }, 2000);
-
           if (serverId) {
             openvpnProcesses.set(serverId, {
-              process: {
-                pid: pid,
-                kill: () => {
-                  clearInterval(logPoller);
-                  clearInterval(exitMonitor);
-                },
-                unref: () => { },
-              },
+              isElevated: true,
+              pid: pid,
+              logPath: logPath,
+              lastLogSize: 0,
               filePath: filePath,
               tempAuthFile: tempAuthFile,
-              logPath: logPath,
               startTime: Date.now(),
             });
 
-            // Duration Ticker
-            if (tray) {
-              const startTime = Date.now();
-              const ticker = setInterval(() => {
-                const showTimer = getPreference("showDurationTimer", true);
-                if (!showTimer) {
-                  if (isMacOS()) tray.setTitle("");
-                  return;
-                }
-                const diff = Date.now() - startTime;
-                const timeString = new Date(diff).toISOString().substr(11, 8);
-
-                if (isMacOS()) {
-                  tray.setTitle(timeString);
-                } else {
-                  tray.setToolTip(`RCP Network: ${timeString}`);
-                }
-              }, 1000);
-              durationIntervals.set(serverId, ticker);
-            }
+            // Emit connected event
+            appEvents.emit('vpn-connected', { serverId, startTime: Date.now() });
 
             if (mainWindow && !mainWindow.isDestroyed()) {
               mainWindow.webContents.send("vpn-connected", {
@@ -2537,7 +2526,7 @@ const connectVpn = async (data) => {
             }
           }
 
-          startTrafficMonitor();
+          startAppHeartbeat();
           await flushDns();
           return {
             success: true,
@@ -2644,51 +2633,13 @@ const connectVpn = async (data) => {
           startTime: Date.now(),
         });
 
-        // Duration Ticker
-        if (tray) {
-          const startTime = Date.now();
-          const ticker = setInterval(() => {
-            const showTimer = getPreference("showDurationTimer", true);
-            if (!showTimer) {
-              if (isMacOS()) tray.setTitle("");
-              return;
-            }
-            const diff = Date.now() - startTime;
-            const timeString = new Date(diff).toISOString().substr(11, 8);
-
-            if (isMacOS()) {
-              tray.setTitle(timeString);
-            } else {
-              tray.setToolTip(`RCP Network: ${timeString}`);
-            }
-          }, 1000);
-          durationIntervals.set(serverId, ticker);
-        }
-
         openvpnProcess.on("exit", (code, signal) => {
           console.log(`OpenVPN process exited with code ${code}`);
-          if (openvpnProcesses.has(serverId)) {
-            openvpnProcesses.delete(serverId);
-
-            // Clear tickers
-            if (durationIntervals.has(serverId)) {
-              clearInterval(durationIntervals.get(serverId));
-              durationIntervals.delete(serverId);
-              if (tray && durationIntervals.size === 0) tray.setTitle("");
-            }
-
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send("vpn-disconnected", {
-                serverId,
-                reason: `Process exited with code ${code}`,
-              });
-            }
-            try {
-              fs.unlinkSync(tempAuthFile);
-            } catch (e) { }
-            updateTrayMenu();
-          }
+          handleVpnExit(serverId, `Process exited with code ${code}`);
         });
+
+        // Emit connected event
+        appEvents.emit('vpn-connected', { serverId, startTime: Date.now() });
 
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send("vpn-connected", {
@@ -2697,7 +2648,7 @@ const connectVpn = async (data) => {
           });
         }
       }
-      startTrafficMonitor();
+      startAppHeartbeat();
       flushDns().then(() => {
         resolve({
           success: true,
@@ -2792,16 +2743,13 @@ ipcMain.handle("get-app-version", () => {
 const disconnectVpn = async (serverId) => {
   try {
     // Clear duration and ticker timers
+    // Note: actual process kill + openvpnProcesses cleanup + "vpn-disconnected"
+    // notification happens in the platform-specific blocks below (via handleVpnExit),
+    // AFTER the real OS process is confirmed killed — not before.
     if (serverId) {
       if (connectionTimers.has(serverId)) {
         clearTimeout(connectionTimers.get(serverId));
         connectionTimers.delete(serverId);
-      }
-      if (durationIntervals.has(serverId)) {
-        clearInterval(durationIntervals.get(serverId));
-        durationIntervals.delete(serverId);
-        // Reset tray title on disconnect
-        if (tray && durationIntervals.size === 0) tray.setTitle("");
       }
     } else {
       // Clear all timers
@@ -2809,11 +2757,6 @@ const disconnectVpn = async (serverId) => {
         clearTimeout(timer);
       }
       connectionTimers.clear();
-      for (const [id, interval] of durationIntervals.entries()) {
-        clearInterval(interval);
-      }
-      durationIntervals.clear();
-      if (tray) tray.setTitle("");
     }
 
     if (isWindows()) {
@@ -2821,34 +2764,28 @@ const disconnectVpn = async (serverId) => {
       if (serverId) {
         // Disconnect specific server
         const processInfo = openvpnProcesses.get(serverId);
-        if (processInfo && processInfo.process && processInfo.process.pid) {
+        const pid = processInfo
+          ? processInfo.isElevated
+            ? processInfo.pid
+            : processInfo.process && processInfo.process.pid
+          : null;
+
+        if (processInfo && pid) {
           // Cleanup custom process handlers (pollers)
-          if (processInfo.process.kill) {
+          if (processInfo.process && processInfo.process.kill) {
             try {
               processInfo.process.kill();
             } catch (e) { }
           }
 
           try {
-            await execAsync(`taskkill /F /PID ${processInfo.process.pid}`, {
+            await execAsync(`taskkill /F /PID ${pid} /T`, {
               timeout: 5000,
               shell: true,
             });
           } catch (e) {
             // Process might already be terminated
             logToFile("WARN", "Error killing process:", e.message);
-          }
-
-          // Clean up temp auth file
-          if (
-            processInfo.tempAuthFile &&
-            fs.existsSync(processInfo.tempAuthFile)
-          ) {
-            try {
-              fs.unlinkSync(processInfo.tempAuthFile);
-            } catch (e) {
-              console.error("Error deleting temp auth file:", e);
-            }
           }
 
           // Clean up log file if exists (from elevated process)
@@ -2858,7 +2795,9 @@ const disconnectVpn = async (serverId) => {
             } catch (e) { }
           }
 
-          openvpnProcesses.delete(serverId);
+          // Removes from openvpnProcesses, cleans temp auth file, notifies
+          // renderer ("vpn-disconnected") and refreshes tray
+          handleVpnExit(serverId, "Manual disconnect");
           return { success: true, message: "VPN disconnected" };
         } else {
           openvpnProcesses.delete(serverId); // Ensure removed even if pid missing
@@ -2891,21 +2830,11 @@ const disconnectVpn = async (serverId) => {
             logToFile("WARN", "Error killing OpenVPN processes:", e.message);
           }
 
-          // Clean up all temp auth files
-          for (const [id, processInfo] of openvpnProcesses.entries()) {
-            if (
-              processInfo.tempAuthFile &&
-              fs.existsSync(processInfo.tempAuthFile)
-            ) {
-              try {
-                fs.unlinkSync(processInfo.tempAuthFile);
-              } catch (e) {
-                console.error("Error deleting temp auth file:", e);
-              }
-            }
+          // Removes each from openvpnProcesses, cleans temp auth files,
+          // notifies renderer and refreshes tray
+          for (const [id] of Array.from(openvpnProcesses.entries())) {
+            handleVpnExit(id, "All VPNs disconnected");
           }
-
-          openvpnProcesses.clear();
           return { success: true, message: "All VPNs disconnected" };
         } else {
           return { success: true, message: "No active VPN connections" };
@@ -2967,19 +2896,9 @@ const disconnectVpn = async (serverId) => {
             }
           }
 
-          // Clean up temp auth file
-          if (
-            processInfo.tempAuthFile &&
-            fs.existsSync(processInfo.tempAuthFile)
-          ) {
-            try {
-              fs.unlinkSync(processInfo.tempAuthFile);
-            } catch (e) {
-              console.error("Error deleting temp auth file:", e);
-            }
-          }
-
-          openvpnProcesses.delete(serverId);
+          // Removes from openvpnProcesses, cleans temp auth file, notifies
+          // renderer ("vpn-disconnected") and refreshes tray
+          handleVpnExit(serverId, "Manual disconnect");
           return { success: true, message: "VPN disconnected" };
         } else {
           openvpnProcesses.delete(serverId);
@@ -2997,21 +2916,11 @@ const disconnectVpn = async (serverId) => {
             await execAsync("pkill -f openvpn", { timeout: 5000 });
           }
 
-          // Clean up all temp auth files
-          for (const [id, processInfo] of openvpnProcesses.entries()) {
-            if (
-              processInfo.tempAuthFile &&
-              fs.existsSync(processInfo.tempAuthFile)
-            ) {
-              try {
-                fs.unlinkSync(processInfo.tempAuthFile);
-              } catch (e) {
-                console.error("Error deleting temp auth file:", e);
-              }
-            }
+          // Removes each from openvpnProcesses, cleans temp auth files,
+          // notifies renderer and refreshes tray
+          for (const [id] of Array.from(openvpnProcesses.entries())) {
+            handleVpnExit(id, "All VPNs disconnected");
           }
-
-          openvpnProcesses.clear();
           return { success: true, message: "All VPNs disconnected" };
         } else {
           return { success: true, message: "No active VPN connections" };
@@ -3207,12 +3116,7 @@ function startAwakeMode(duration = null) {
       }
     }, duration);
 
-    // Update Tray Title or Menu Item periodically
-    awakeTrayInterval = setInterval(() => {
-      updateTrayMenu();
-    }, 60000); // Update every minute to keep menu fresh?
-    // Or simpler: We just update menu when opened? No, Tray doesn't have on-open event easily.
-    // We will update the label in updateTrayMenu dynamically based on current time.
+    // Tray updates are now event-driven
   } else {
     awakeExpiry = null;
   }

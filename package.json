@@ -1,6 +1,6 @@
 {
   "name": "rcp-network",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "RCP Network Desktop Application",
   "author": {
     "name": "Ilham Fauzi",
@@ -91,9 +91,27 @@
     "mac": {
       "category": "public.app-category.networking",
       "target": [
-        { "target": "dmg", "arch": ["x64", "arm64"] },
-        { "target": "zip", "arch": ["x64", "arm64"] },
-        { "target": "pkg", "arch": ["x64", "arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "pkg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
       ],
       "icon": "icons/mac/icon.icns",
       "hardenedRuntime": true,

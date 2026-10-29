@@ -1,7 +1,9 @@
 // One-time privileged setup for macOS and Linux.
 //
 // Installs a root-owned helper script plus a sudoers rule that lets the user
-// who ran setup run only that helper without a password. After that the app
+// who ran setup run only that helper without a password. On macOS it also
+// makes a root-owned private copy of the Homebrew OpenVPN and its libraries,
+// the only OpenVPN the helper runs there. After that the app
 // runs every privileged action as `sudo -n <helper> <command>` and never
 // needs, stores or pipes the person's password.
 //
@@ -15,9 +17,24 @@ const { execFile } = require("child_process");
 
 // Must match HELPER_VERSION in helper/rcp-network-helper. Bump both when the
 // helper changes, so installed copies are upgraded (and only then).
-const HELPER_VERSION = 1;
+const HELPER_VERSION = 2;
 
 const SUDOERS_PATH = "/etc/sudoers.d/rcp-network";
+
+// macOS: the private OpenVPN copy the helper uses (MAC_BUNDLE_DIR there).
+const MAC_OPENVPN_BUNDLE_DIR = "/Library/PrivilegedHelperTools/rcp-network";
+const MAC_OPENVPN_BUNDLE_BINARY = `${MAC_OPENVPN_BUNDLE_DIR}/bin/openvpn`;
+
+// macOS: where findOpenVpnPath looks for the Homebrew (or system) OpenVPN
+// that setup copies.
+const MAC_OPENVPN_PATHS = [
+  "/opt/homebrew/sbin/openvpn", // Homebrew Apple Silicon (sbin)
+  "/opt/homebrew/bin/openvpn", // Homebrew Apple Silicon (bin)
+  "/usr/local/sbin/openvpn", // Homebrew Intel (sbin)
+  "/usr/local/bin/openvpn", // Homebrew Intel (bin)
+  "/usr/sbin/openvpn", // System sbin
+  "/usr/bin/openvpn", // System bin
+];
 
 const SETUP_INCOMPLETE_ERROR =
   "One-time setup was not completed. Connect again to set up.";
@@ -55,6 +72,10 @@ const helperSourcePath = ({ isPackaged = false, resourcesPath = process.resource
   return path.join(__dirname, "helper", "rcp-network-helper");
 };
 
+// The macOS bundling script ships next to the helper.
+const bundleScriptSourcePath = (sourceHelper = helperSourcePath()) =>
+  path.join(path.dirname(sourceHelper), "bundle-openvpn");
+
 const rootGroup = (platform) => (platform === "darwin" ? "wheel" : "root");
 
 const shellQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
@@ -83,11 +104,59 @@ const buildSudoersRule = (user, helperPath) => {
   ].join("\n");
 };
 
+// macOS only: stage the private OpenVPN copy before the sudoers rule.
+const macBundleStep = ({ openvpnSource, bundleScript }) => `
+# 2b. Make the private OpenVPN copy in a root-owned staging folder: the
+#     binary and its Homebrew libraries, pointed at each other, re-signed.
+OPENVPN_SRC=${shellQuote(openvpnSource)}
+BUNDLE_SCRIPT_SRC=${shellQuote(bundleScript)}
+[ -f "$OPENVPN_SRC" ] || fail "OpenVPN not found: $OPENVPN_SRC"
+[ -f "$BUNDLE_SCRIPT_SRC" ] || fail "bundle script not found: $BUNDLE_SCRIPT_SRC"
+rm -rf "$BUNDLE_NEW" "$BUNDLE_TOOL"
+cp "$BUNDLE_SCRIPT_SRC" "$BUNDLE_TOOL"
+chown root:wheel "$BUNDLE_TOOL"
+chmod 700 "$BUNDLE_TOOL"
+mkdir -m 700 "$BUNDLE_NEW"
+chown root:wheel "$BUNDLE_NEW"
+/bin/sh "$BUNDLE_TOOL" "$OPENVPN_SRC" "$BUNDLE_NEW" || fail "could not copy OpenVPN"
+
+# 2c. Everything root:wheel; folders and the binary 755, libraries 644.
+chown -R root:wheel "$BUNDLE_NEW"
+chmod 755 "$BUNDLE_NEW" "$BUNDLE_NEW/bin" "$BUNDLE_NEW/lib"
+chmod 755 "$BUNDLE_NEW/bin/openvpn"
+for f in "$BUNDLE_NEW"/lib/*; do
+  if [ -f "$f" ]; then chmod 644 "$f"; fi
+done
+check_root_folder "$BUNDLE_NEW/bin"
+check_root_folder "$BUNDLE_NEW/lib"
+`;
+
+// macOS only: replace any old copy only once the new one is complete.
+const macBundleMove = () => `mv -f "$HELPER_NEW" "$HELPER_DST"
+if [ -e "$BUNDLE_DST" ] || [ -L "$BUNDLE_DST" ]; then
+  rm -rf "$BUNDLE_OLD"
+  mv "$BUNDLE_DST" "$BUNDLE_OLD"
+fi
+mv "$BUNDLE_NEW" "$BUNDLE_DST"
+rm -rf "$BUNDLE_OLD"
+`;
+
 // Shell script run once as root. It stages everything first and only moves
-// the helper and the rule into place after every check passed, so a failing
-// step installs nothing.
-const buildInstallScript = ({ platform, user, sourceHelper, helperPath }) => {
+// the helper, the OpenVPN copy (macOS) and the rule into place after every
+// check passed, so a failing step installs nothing.
+const buildInstallScript = ({
+  platform,
+  user,
+  sourceHelper,
+  helperPath,
+  openvpnSource,
+  bundleScript = bundleScriptSourcePath(sourceHelper),
+}) => {
   const rule = buildSudoersRule(user, helperPath);
+  const mac = platform === "darwin";
+  if (mac && (typeof openvpnSource !== "string" || !path.isAbsolute(openvpnSource))) {
+    throw new Error("OpenVPN not found. Install OpenVPN (brew install openvpn), then connect again to finish setup.");
+  }
   const group = rootGroup(platform);
   const statFormat =
     platform === "darwin" ? "stat -f '%u %Lp'" : "stat -c '%u %a'";
@@ -106,8 +175,13 @@ HELPER_DIR=${shellQuote(helperDir)}
 RULE_DST=${shellQuote(SUDOERS_PATH)}
 HELPER_NEW="$HELPER_DST.new"
 RULE_NEW=/etc/sudoers.d/.rcp-network.new
+${mac ? `BUNDLE_DST=${shellQuote(MAC_OPENVPN_BUNDLE_DIR)}
+BUNDLE_NEW="$BUNDLE_DST.new"
+BUNDLE_OLD="$BUNDLE_DST.old"
+BUNDLE_TOOL="$BUNDLE_DST.bundle-openvpn"
 
-cleanup() { rm -f "$HELPER_NEW" "$RULE_NEW"; }
+cleanup() { rm -f "$HELPER_NEW" "$RULE_NEW" "$BUNDLE_TOOL"; rm -rf "$BUNDLE_NEW"; }` : `
+cleanup() { rm -f "$HELPER_NEW" "$RULE_NEW"; }`}
 trap cleanup EXIT
 
 fail() { echo "rcp-network setup: $*" >&2; exit 1; }
@@ -148,7 +222,7 @@ rm -f "$HELPER_NEW"
 cp "$HELPER_SRC" "$HELPER_NEW"
 chown root:${group} "$HELPER_NEW"
 chmod 755 "$HELPER_NEW"
-
+${mac ? macBundleStep({ openvpnSource, bundleScript }) : ""}
 # 3. Write the rule to a temporary file and check it with visudo.
 #    (sudo ignores files in sudoers.d whose name contains a dot.)
 mkdir -p /etc/sudoers.d
@@ -161,9 +235,9 @@ visudo -c -f "$RULE_NEW"
 chown root:${group} "$RULE_NEW"
 chmod 0440 "$RULE_NEW"
 
-# 5. Move both into place.
-mv -f "$HELPER_NEW" "$HELPER_DST"
-mv -f "$RULE_NEW" "$RULE_DST"
+# 5. Move everything into place.
+${mac ? macBundleMove() : `mv -f "$HELPER_NEW" "$HELPER_DST"
+`}mv -f "$RULE_NEW" "$RULE_DST"
 echo "rcp-network setup: installed"
 `;
 };
@@ -171,8 +245,21 @@ echo "rcp-network setup: installed"
 const errorText = (error) =>
   `${(error && error.stderr) || ""}\n${(error && error.message) || ""}`;
 
+// The private OpenVPN copy must be there and run; OpenVPN before 2.6 exits 1
+// after printing its version.
+const checkOpenVpnCopy = async (run, binary, exists) => {
+  if (!exists(binary)) return false;
+  try {
+    await run(binary, ["--version"]);
+    return true;
+  } catch (error) {
+    return /^OpenVPN /.test(String((error && error.stdout) || ""));
+  }
+};
+
 const checkHelper = async (run = defaultRun, options = {}) => {
-  const helperPath = options.helperPath || helperInstallPath(options.platform);
+  const platform = options.platform || process.platform;
+  const helperPath = options.helperPath || helperInstallPath(platform);
   const exists = options.exists || fs.existsSync;
 
   if (!exists(helperPath)) {
@@ -193,6 +280,12 @@ const checkHelper = async (run = defaultRun, options = {}) => {
   if (!Number.isInteger(version) || version < HELPER_VERSION) {
     return { ok: false, reason: "outdated", version: Number.isInteger(version) ? version : null };
   }
+  if (platform === "darwin") {
+    const binary = options.openvpnBundle || MAC_OPENVPN_BUNDLE_BINARY;
+    if (!(await checkOpenVpnCopy(run, binary, exists))) {
+      return { ok: false, reason: "outdated", version };
+    }
+  }
   return { ok: true, version };
 };
 
@@ -212,7 +305,14 @@ const runSetup = async (run = defaultRun, platform = process.platform, options =
 
   let script;
   try {
-    script = buildInstallScript({ platform, user, sourceHelper, helperPath });
+    script = buildInstallScript({
+      platform,
+      user,
+      sourceHelper,
+      helperPath,
+      openvpnSource: options.openvpnSource,
+      bundleScript: options.bundleScript,
+    });
   } catch (error) {
     return { ok: false, error: error.message };
   }
@@ -282,10 +382,14 @@ const ensureHelper = async (run = defaultRun, platform = process.platform, optio
 module.exports = {
   HELPER_VERSION,
   SUDOERS_PATH,
+  MAC_OPENVPN_BUNDLE_DIR,
+  MAC_OPENVPN_BUNDLE_BINARY,
+  MAC_OPENVPN_PATHS,
   SETUP_INCOMPLETE_ERROR,
   defaultRun,
   helperInstallPath,
   helperSourcePath,
+  bundleScriptSourcePath,
   buildSudoersRule,
   buildInstallScript,
   checkHelper,

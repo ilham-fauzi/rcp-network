@@ -1211,20 +1211,34 @@ const ensurePrivilegedHelper = () => {
   if (isWindows()) return Promise.resolve({ ok: true, setupRan: false });
   // Startup and a connect may ask at the same time; share one prompt
   if (!helperSetupPromise) {
-    helperSetupPromise = privileged
-      .ensureHelper(privileged.defaultRun, process.platform, {
-        sourceHelper: privileged.helperSourcePath({
-          isPackaged: app.isPackaged,
-          resourcesPath: process.resourcesPath,
+    helperSetupPromise = macOpenVpnSource()
+      .then((openvpnSource) =>
+        privileged.ensureHelper(privileged.defaultRun, process.platform, {
+          sourceHelper: privileged.helperSourcePath({
+            isPackaged: app.isPackaged,
+            resourcesPath: process.resourcesPath,
+          }),
+          user: os.userInfo().username,
+          openvpnSource,
         }),
-        user: os.userInfo().username,
-      })
+      )
       .catch((error) => ({ ok: false, error: error.message }))
       .finally(() => {
         helperSetupPromise = null;
       });
   }
   return helperSetupPromise;
+};
+
+// macOS: the OpenVPN that setup copies into the helper's private folder
+const macOpenVpnSource = async () => {
+  if (!isMacOS()) return undefined;
+  try {
+    const found = await findOpenVpnPath();
+    return path.isAbsolute(found) ? found : undefined;
+  } catch (e) {
+    return undefined;
+  }
 };
 
 // Run a helper command through sudo -n (never prompts)
@@ -1486,14 +1500,7 @@ const findOpenVpnPath = async () => {
     }
   } else {
     // macOS paths (existing implementation)
-    const possiblePaths = [
-      "/opt/homebrew/sbin/openvpn", // Homebrew Apple Silicon (sbin)
-      "/opt/homebrew/bin/openvpn", // Homebrew Apple Silicon (bin)
-      "/usr/local/sbin/openvpn", // Homebrew Intel (sbin)
-      "/usr/local/bin/openvpn", // Homebrew Intel (bin)
-      "/usr/sbin/openvpn", // System sbin
-      "/usr/bin/openvpn", // System bin
-    ];
+    const possiblePaths = privileged.MAC_OPENVPN_PATHS;
 
     // Try to find using 'which' command
     try {

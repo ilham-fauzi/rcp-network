@@ -20,6 +20,8 @@ const util = require("util");
 const execAsync = util.promisify(exec);
 const keytar = require("keytar");
 const privileged = require("./privileged");
+const { createCredentialStore } = require("./credentials");
+const { authFileDone, removeAuthFile, removeLeftoverAuthFiles } = require("./auth-file");
 const { createUpdater, AUTO_CHECK_KEY } = require("./updater");
 const { DOWNLOAD_PAGE } = require("./updater/logic");
 const si = require("systeminformation");
@@ -76,6 +78,7 @@ function startAppHeartbeat() {
             });
             stream.on("data", (chunk) => {
               const message = chunk.toString();
+              noteVpnOutput(serverId, message);
               if (mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send("vpn-log", { serverId, message });
               }
@@ -119,6 +122,16 @@ function startAppHeartbeat() {
   }, 1000);
 }
 
+// OpenVPN output: once it reports the connection, it no longer needs the
+// temporary auth file with the VPN login, so delete it right away
+function noteVpnOutput(serverId, message) {
+  const procInfo = openvpnProcesses.get(serverId);
+  if (procInfo && procInfo.tempAuthFile && authFileDone(message)) {
+    removeAuthFile(procInfo.tempAuthFile);
+    procInfo.tempAuthFile = null;
+  }
+}
+
 function handleVpnExit(serverId, reason) {
   if (openvpnProcesses.has(serverId)) {
     const procInfo = openvpnProcesses.get(serverId);
@@ -148,7 +161,9 @@ const APP_NAME = app.getName() || "rcp-network";
 const VPN_DIRECTORY = path.join(os.homedir(), `.${APP_NAME}`);
 const KEYCHAIN_SERVICE = `${APP_NAME}_sudo_password`;
 const KEYCHAIN_ACCOUNT = "sudo_password";
-const VPN_CRED_SERVICE = `${APP_NAME}_vpn_credentials`;
+
+// Saved VPN credentials (only when ticked): a local 0600 file, not the keychain
+const credentialStore = createCredentialStore(VPN_DIRECTORY, { log: (level, msg) => logToFile(level, msg) });
 
 // User preferences file (simple JSON)
 const PREFS_FILE = path.join(VPN_DIRECTORY, "preferences.json");
@@ -489,6 +504,12 @@ app.whenReady().then(async () => {
   const dirResult = await createVpnDirectory();
   if (!dirResult.success) {
     logToFile("ERROR", "Failed to create VPN directory:", dirResult.error);
+  }
+
+  // Auth files left by a crash or by older versions hold the VPN login
+  const leftovers = removeLeftoverAuthFiles(VPN_DIRECTORY);
+  if (leftovers.length > 0) {
+    logToFile("INFO", `Removed ${leftovers.length} leftover auth file(s)`);
   }
 
   if (!isWindows()) {
@@ -1067,19 +1088,21 @@ ipcMain.on("tray-auth-submit", async (event, data) => {
   });
 
   if (result.success) {
-    // Handle credential persistence via keytar
+    // Saved credentials: keep what is ticked, remove what is not
     const credsToSave = {};
+    const unticked = [];
     if (saveEmail) {
       credsToSave.email = email;
     } else {
-      // Delete saved email if unchecked
-      await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_email`).catch(() => { });
+      unticked.push("email");
     }
     if (savePassword) {
       credsToSave.password = password;
     } else {
-      // Delete saved password if unchecked
-      await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_password`).catch(() => { });
+      unticked.push("password");
+    }
+    if (unticked.length > 0) {
+      await deleteVpnCredentials(filename, unticked);
     }
     if (Object.keys(credsToSave).length > 0) {
       await saveVpnCredentials(filename, credsToSave);
@@ -1088,13 +1111,12 @@ ipcMain.on("tray-auth-submit", async (event, data) => {
     // Bulk save credentials to all configs if "Apply to all" is checked
     if (applyAll) {
       try {
-        const files = fs.readdirSync(VPN_DIRECTORY).filter((f) => f.endsWith(".ovpn"));
         const bulkCreds = {};
         if (saveEmail && email) bulkCreds.email = email;
         if (savePassword && password) bulkCreds.password = password;
         if (Object.keys(bulkCreds).length > 0) {
-          await Promise.all(files.map((file) => saveVpnCredentials(file, bulkCreds)));
-          logToFile("INFO", `Tray: Bulk saved credentials to ${files.length} configs`);
+          const count = credentialStore.saveToAll(bulkCreds);
+          logToFile("INFO", `Tray: Bulk saved credentials to ${count} configs`);
         }
       } catch (bulkError) {
         console.error("Error bulk saving from tray:", bulkError);
@@ -1525,16 +1547,11 @@ const findOpenVpnPath = async () => {
   }
 };
 
-// Save VPN credentials to system keychain (per-server)
+// Save VPN credentials to the local credentials file (per-server)
 const saveVpnCredentials = async (filename, { email, password }) => {
   try {
-    if (email !== undefined && email !== null) {
-      await keytar.setPassword(VPN_CRED_SERVICE, `${filename}_email`, email);
-    }
-    if (password !== undefined && password !== null) {
-      await keytar.setPassword(VPN_CRED_SERVICE, `${filename}_password`, password);
-    }
-    logToFile("INFO", `VPN credentials saved for ${filename}`);
+    const changed = credentialStore.save(filename, { email, password });
+    logToFile("INFO", changed ? `VPN credentials saved for ${filename}` : `VPN credentials unchanged for ${filename}`);
     return true;
   } catch (error) {
     console.error("Error saving VPN credentials:", error);
@@ -1542,24 +1559,21 @@ const saveVpnCredentials = async (filename, { email, password }) => {
   }
 };
 
-// Load VPN credentials from system keychain (per-server)
+// Load VPN credentials from the local credentials file (per-server)
 const loadVpnCredentials = async (filename) => {
   try {
-    const email = await keytar.getPassword(VPN_CRED_SERVICE, `${filename}_email`);
-    const password = await keytar.getPassword(VPN_CRED_SERVICE, `${filename}_password`);
-    return { email: email || null, password: password || null };
+    return credentialStore.load(filename);
   } catch (error) {
     console.error("Error loading VPN credentials:", error);
     return { email: null, password: null };
   }
 };
 
-// Delete VPN credentials from system keychain (per-server)
-const deleteVpnCredentials = async (filename) => {
+// Delete saved VPN credentials (both fields, or only the ones given)
+const deleteVpnCredentials = async (filename, fields) => {
   try {
-    await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_email`).catch(() => { });
-    await keytar.deletePassword(VPN_CRED_SERVICE, `${filename}_password`).catch(() => { });
-    logToFile("INFO", `VPN credentials deleted for ${filename}`);
+    credentialStore.remove(filename, fields);
+    logToFile("INFO", `VPN credentials deleted for ${filename}${fields ? ` (${fields.join(", ")})` : ""}`);
     return true;
   } catch (error) {
     console.error("Error deleting VPN credentials:", error);
@@ -1956,7 +1970,7 @@ const connectVpn = async (data) => {
     }
 
     // Note: Credential persistence (save email/password) is now handled
-    // via keytar in the tray-auth-submit and connect-vpn IPC handlers,
+    // in the local credentials file by the tray-auth-submit and renderer handlers,
     // not by modifying .ovpn files.
 
     // Build OpenVPN command
@@ -2243,6 +2257,7 @@ const connectVpn = async (data) => {
       if (openvpnProcess.stderr) {
         openvpnProcess.stderr.on("data", (d) => {
           const message = d.toString();
+          if (serverId) noteVpnOutput(serverId, message);
           console.error("OpenVPN stderr:", message);
           if (serverId && mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send("vpn-log", { serverId, message });
@@ -2252,6 +2267,7 @@ const connectVpn = async (data) => {
       if (openvpnProcess.stdout) {
         openvpnProcess.stdout.on("data", (d) => {
           const message = d.toString();
+          if (serverId) noteVpnOutput(serverId, message);
           console.log("OpenVPN stdout:", message);
           if (serverId && mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send("vpn-log", { serverId, message });
@@ -2260,6 +2276,7 @@ const connectVpn = async (data) => {
       }
 
       if (!openvpnProcess.pid) {
+        removeAuthFile(tempAuthFile);
         resolve({ success: false, error: "Failed to start OpenVPN process." });
         return;
       }
@@ -2315,8 +2332,8 @@ ipcMain.handle("load-vpn-credentials", async (event, filename) => {
   return await loadVpnCredentials(filename);
 });
 
-ipcMain.handle("delete-vpn-credentials", async (event, filename) => {
-  const success = await deleteVpnCredentials(filename);
+ipcMain.handle("delete-vpn-credentials", async (event, filename, fields) => {
+  const success = await deleteVpnCredentials(filename, Array.isArray(fields) ? fields : undefined);
   return { success };
 });
 
@@ -2327,7 +2344,6 @@ ipcMain.handle("bulk-save-vpn-credentials", async (event, credentials) => {
     if (!fs.existsSync(VPN_DIRECTORY)) {
       return { success: false, error: "VPN directory not found", count: 0 };
     }
-    const files = fs.readdirSync(VPN_DIRECTORY).filter((f) => f.endsWith(".ovpn"));
     const credsToSave = {};
     if (saveEmail && email) credsToSave.email = email;
     if (savePassword && password) credsToSave.password = password;
@@ -2336,9 +2352,9 @@ ipcMain.handle("bulk-save-vpn-credentials", async (event, credentials) => {
       return { success: false, error: "No credentials to save", count: 0 };
     }
 
-    await Promise.all(files.map((file) => saveVpnCredentials(file, credsToSave)));
-    logToFile("INFO", `Bulk saved credentials to ${files.length} configs`);
-    return { success: true, count: files.length };
+    const count = credentialStore.saveToAll(credsToSave);
+    logToFile("INFO", `Bulk saved credentials to ${count} configs`);
+    return { success: true, count };
   } catch (error) {
     console.error("Error bulk saving credentials:", error);
     return { success: false, error: error.message, count: 0 };

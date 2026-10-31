@@ -101,7 +101,7 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
 
 
 
-  // Load saved email and password for selected server from keytar
+  // Load saved email and password for selected server from the local credentials file
   useEffect(() => {
     const loadCredentials = async () => {
       if (selectedServer && window.electronAPI && window.electronAPI.loadVpnCredentials) {
@@ -332,7 +332,7 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
       if (result.success) {
         addLog('Connected');
 
-        // Handle credential persistence via keytar
+        // Saved credentials (local file): keep what is ticked, remove what is not
         const filename = selectedServer.filePath ? selectedServer.filePath.split('/').pop() : null;
         if (filename && window.electronAPI.saveVpnCredentials) {
           const credsToSave = {};
@@ -340,14 +340,14 @@ const ConnectionControl = ({ selectedServer, connectedServers, onConnectionChang
             credsToSave.email = authData.email;
             setSavedEmail(authData.email);
           } else {
-            // Delete saved email if unchecked
-            await window.electronAPI.deleteVpnCredentials(filename).catch(() => { });
+            await window.electronAPI.deleteVpnCredentials(filename, ['email']).catch(() => { });
             setSavedEmail(null);
           }
           if (authData.savePassword) {
             credsToSave.password = authData.password;
             setSavedPassword(authData.password);
           } else {
+            await window.electronAPI.deleteVpnCredentials(filename, ['password']).catch(() => { });
             setSavedPassword(null);
           }
           if (Object.keys(credsToSave).length > 0) {

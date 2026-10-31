@@ -32,7 +32,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // VPN Credential Storage
   saveVpnCredentials: (filename, credentials) => ipcRenderer.invoke('save-vpn-credentials', filename, credentials),
   loadVpnCredentials: (filename) => ipcRenderer.invoke('load-vpn-credentials', filename),
-  deleteVpnCredentials: (filename) => ipcRenderer.invoke('delete-vpn-credentials', filename),
+  deleteVpnCredentials: (filename, fields) => ipcRenderer.invoke('delete-vpn-credentials', filename, fields),
   bulkSaveVpnCredentials: (credentials) => ipcRenderer.invoke('bulk-save-vpn-credentials', credentials),
   // Timer Preference
   getTimerPreference: () => ipcRenderer.invoke('get-timer-preference'),

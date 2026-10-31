@@ -351,10 +351,10 @@ test("macOS install script is valid sh; Linux script has no bundle step", () => 
 
 // --- version ------------------------------------------------------------------------
 
-test("HELPER_VERSION is 2 in the module and the script", () => {
-  assert.strictEqual(privileged.HELPER_VERSION, 2);
+test("HELPER_VERSION is 3 in the module and the script", () => {
+  assert.strictEqual(privileged.HELPER_VERSION, 3);
   const script = fs.readFileSync(HELPER, "utf8");
-  assert.match(script, /^HELPER_VERSION=2$/m);
+  assert.match(script, /^HELPER_VERSION=3$/m);
 });
 
 test("package.json ships bundle-openvpn outside app.asar", () => {

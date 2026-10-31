@@ -323,9 +323,15 @@ rcp_network/
 - **No Stored Admin Password**: The admin password is entered only in the system's own dialog during one-time setup and is never stored by the app
 - **Narrow sudo Rule**: The sudoers rule allows only the root-owned helper, for only the user who ran setup
 - **Root-Owned OpenVPN**: The helper runs only an OpenVPN binary (and libraries) that is owned by root and not writable by the user
-- **Keychain Storage**: Saved VPN credentials are stored in the system keychain
+- **Saved VPN Credentials**: Only when "Save Email" or "Save Password" is ticked, kept in `~/.rcp-network/credentials.json` (mode 0600, folder 0700). The file is plain text: anything running as you, and backups such as Time Machine, can read it. The keychain is not used, so switching profiles never shows a keychain prompt
+- **Temporary Auth Files**: The VPN login handed to OpenVPN (`.vpn_auth_*.tmp`) is deleted as soon as the connection is up, fails or ends, and leftovers are deleted at launch
 - **File Isolation**: All VPN files stored in dedicated directory (`~/.rcp-network`)
-- **Password Handling**: Passwords never stored in plain text files
+
+Versions before this one kept saved VPN credentials in the keychain. The app no longer reads them; to remove them once, run in Terminal:
+
+```bash
+while security delete-generic-password -s rcp-network_vpn_credentials >/dev/null 2>&1; do :; done
+```
 - **IPC Security**: Context isolation enabled, no node integration in renderer
 
 ## License

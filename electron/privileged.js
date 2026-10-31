@@ -17,7 +17,7 @@ const { execFile } = require("child_process");
 
 // Must match HELPER_VERSION in helper/rcp-network-helper. Bump both when the
 // helper changes, so installed copies are upgraded (and only then).
-const HELPER_VERSION = 2;
+const HELPER_VERSION = 3;
 
 const SUDOERS_PATH = "/etc/sudoers.d/rcp-network";
 

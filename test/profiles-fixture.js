@@ -35,7 +35,17 @@ const cleanup = () => {
   fixture.cleanup();
 };
 
+// The helper tells a running OpenVPN by `ps`; a sandbox that blocks it (as
+// sfa verify's does) would make every profile look stopped.
+const requirePs = () => {
+  const r = spawnSync("/bin/ps", ["-p", String(process.pid), "-o", "pid="], { encoding: "utf8" });
+  if (r.status !== 0) {
+    throw new Error(`needs /bin/ps, which cannot run here (${(r.stderr || r.error || "").toString().trim()}); run verify with --sandbox none`);
+  }
+};
+
 const setup = () => {
+  requirePs();
   const openvpn = fixture.trustedOpenVpn();
   if (openvpn.skip) throw new Error(openvpn.skip);
   const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rcp-profiles-")));

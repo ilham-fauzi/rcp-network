@@ -21,7 +21,7 @@
 #
 # POSIX sh on purpose: macOS ships bash 3.2 and Linux may have no bash.
 
-HELPER_VERSION=2
+HELPER_VERSION=3
 
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
@@ -47,13 +47,16 @@ DRY_RUN=0
 # Test mode: only honoured when not root, so it opens no bypass.
 #   RCP_HELPER_TEST_TRUSTED_UID    also trusted as owner, next to uid 0
 #   RCP_HELPER_TEST_OPENVPN_BUNDLE replaces $MAC_BUNDLE_DIR on macOS
+#   RCP_HELPER_TEST_PID_DIR        an existing folder used as the PID folder
 TRUSTED_UID=0
+TEST_PID_DIR=
 if [ "$RUN_UID" -ne 0 ]; then
   case ${RCP_HELPER_TEST_TRUSTED_UID:-} in
     ''|*[!0-9]*) ;;
     *) TRUSTED_UID=$RCP_HELPER_TEST_TRUSTED_UID ;;
   esac
   [ -n "${RCP_HELPER_TEST_OPENVPN_BUNDLE:-}" ] && MAC_BUNDLE_DIR=$RCP_HELPER_TEST_OPENVPN_BUNDLE
+  TEST_PID_DIR=${RCP_HELPER_TEST_PID_DIR:-}
 fi
 
 # --- whose files are allowed -------------------------------------------------
@@ -266,6 +269,12 @@ prepare_pid_dir() {
     trap 'rm -rf "$PID_DIR"' EXIT
     return
   fi
+  if [ -n "$TEST_PID_DIR" ]; then
+    PID_DIR=$TEST_PID_DIR
+    [ -d "$PID_DIR" ] && [ ! -L "$PID_DIR" ] || refuse "$PID_DIR is not a folder"
+    [ "$(owner_uid "$PID_DIR")" = "$RUN_UID" ] || refuse "$PID_DIR is not owned by the user"
+    return
+  fi
   [ "$RUN_UID" -eq 0 ] || refuse "must run as root (through sudo -n)"
   if [ "$OS" = Darwin ]; then
     PID_DIR=/var/run/rcp-network
@@ -318,30 +327,34 @@ forbidden_directive() {
 
 # --- stopping -----------------------------------------------------------------
 
+# sh has no local variables: the helpers below use their own _xx_ prefixed
+# names so they never overwrite a caller's (cmd_connect's id once did, and
+# connecting a second profile stopped the first).
+
 remove_entry() {
   rm -f "$PID_DIR/$1.pid" "$PID_DIR/$1.conf" "$PID_DIR/$1.auth"
 }
 
 # Prints the PID recorded for entry $1 if that process is an openvpn.
 running_pid() {
-  f="$PID_DIR/$1.pid"
-  [ -f "$f" ] || return 1
-  pid=$(head -n 1 "$f" | tr -d ' \r\n')
-  case $pid in
+  _rp_f="$PID_DIR/$1.pid"
+  [ -f "$_rp_f" ] || return 1
+  _rp_pid=$(head -n 1 "$_rp_f" | tr -d ' \r\n')
+  case $_rp_pid in
     ''|*[!0-9]*) return 1 ;;
   esac
-  comm=$(ps -p "$pid" -o comm= 2>/dev/null) || return 1
-  comm=$(printf '%s' "$comm" | tr -d ' \n')
-  [ "${comm##*/}" = openvpn ] || return 1
-  printf '%s\n' "$pid"
+  _rp_comm=$(ps -p "$_rp_pid" -o comm= 2>/dev/null) || return 1
+  _rp_comm=$(printf '%s' "$_rp_comm" | tr -d ' \n')
+  [ "${_rp_comm##*/}" = openvpn ] || return 1
+  printf '%s\n' "$_rp_pid"
 }
 
 stop_entry() {
-  if pid=$(running_pid "$1"); then
+  if _se_pid=$(running_pid "$1"); then
     if [ "$DRY_RUN" -eq 1 ]; then
-      echo "kill -TERM $pid"
+      echo "kill -TERM $_se_pid"
     else
-      kill -TERM "$pid" 2>/dev/null
+      kill -TERM "$_se_pid" 2>/dev/null
     fi
   fi
   remove_entry "$1"
@@ -349,11 +362,11 @@ stop_entry() {
 
 # Remove leftovers of OpenVPN runs that ended on their own.
 collect_stale() {
-  for f in "$PID_DIR"/*.pid "$PID_DIR"/*.conf; do
-    [ -e "$f" ] || continue
-    b=$(basename "$f")
-    id=${b%.*}
-    running_pid "$id" >/dev/null || remove_entry "$id"
+  for _cs_f in "$PID_DIR"/*.pid "$PID_DIR"/*.conf; do
+    [ -e "$_cs_f" ] || continue
+    _cs_b=$(basename "$_cs_f")
+    _cs_id=${_cs_b%.*}
+    running_pid "$_cs_id" >/dev/null || remove_entry "$_cs_id"
   done
 }
 
@@ -366,9 +379,12 @@ cmd_connect() {
   auth=$(checked_file "auth file" "$2") || exit 2
 
   prepare_pid_dir
-  id=$(hash_id "$config")
   if [ "$DRY_RUN" -eq 0 ]; then
     collect_stale
+  fi
+  # After the cleanup, so the entry stopped and written is always this config's
+  id=$(hash_id "$config")
+  if [ "$DRY_RUN" -eq 0 ]; then
     stop_entry "$id"
   fi
 
@@ -415,10 +431,10 @@ cmd_disconnect() {
 cmd_disconnect_all() {
   [ $# -eq 0 ] || refuse "usage: disconnect-all"
   prepare_pid_dir
-  for f in "$PID_DIR"/*.pid; do
-    [ -e "$f" ] || continue
-    b=$(basename "$f")
-    stop_entry "${b%.pid}"
+  for _da_f in "$PID_DIR"/*.pid; do
+    [ -e "$_da_f" ] || continue
+    _da_b=$(basename "$_da_f")
+    stop_entry "${_da_b%.pid}"
   done
   collect_stale
   exit 0
